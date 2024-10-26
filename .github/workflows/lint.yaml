@@ -1,0 +1,36 @@
+name: Lint
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: "3.10"
+          architecture: x64
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Install Dependencies
+        run: |
+          set -eux
+
+          sudo apt-get install -y protobuf-compiler
+
+          pip install .[dev] -v
+      - name: Run Python Lint
+        run: |
+          set -eux
+
+          black --check .
+      - name: Run Rust Lint
+        run: |
+          set -eux
+
+          cargo fmt --check
