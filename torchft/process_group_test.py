@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from unittest import TestCase
+from unittest import TestCase, skipUnless
 
 import torch
 from torch.distributed import TCPStore, ReduceOp
@@ -73,6 +73,7 @@ class ProcessGroupTest(TestCase):
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3))
 
+    @skipUnless(torch.cuda.is_available(), "needs CUDA")
     def test_baby_nccl(self) -> None:
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
