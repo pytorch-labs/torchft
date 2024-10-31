@@ -10,33 +10,29 @@ jobs:
   unittest:
     strategy:
       matrix:
-        os:
-          - ubuntu-20.04
-          - "linux.4xlarge.nvidia.gpu"
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Setup Python
-        uses: actions/setup-python@v2
-        with:
-          python-version: "3.10"
-          architecture: x64
-      - name: Checkout
-        uses: actions/checkout@v2
-      - name: Install Dependencies
-        run: |
-          set -eux
+        include:
+          - runs-on: "linux.2xlarge"
+            gpu-arch-type: "cpu"
+            gpu-arch-version: ""
+          - runs-on: "linux.4xlarge.nvidia.gpu"
+            gpu-arch-type: "cuda"
+            gpu-arch-version: "12.1"
 
-          sudo apt-get install -y protobuf-compiler
+    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
+    with:
+      timeout: 120
+      runner: ${{ matrix.runs-on }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      script: |
+        conda create -n venv python=3.10 protobuf -y
+        conda activate venv
 
-          pip install -e .[dev] -v
-      - name: Run Python Tests
-        run: |
-          set -eux
+        yum install -y rust cargo
 
-          pytest -v
-      - name: Run Rust Lint
-        run: |
-          set -eux
+        python -m pip install --upgrade pip
+        pip install -e .[dev] -v
 
-          cargo test -v
+        pytest -v
+        cargo test -v
 
