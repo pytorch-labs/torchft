@@ -8,6 +8,7 @@ from abc import ABC
 import logging
 from typing import Type, List, Optional, Callable, Tuple
 from datetime import timedelta
+import threading
 
 from torch.futures import Future
 from torch.distributed import (
@@ -25,6 +26,11 @@ import torch
 import torch.multiprocessing as mp
 
 logger = logging.getLogger(__name__)
+
+# TODO: use non strings which are cheaper
+_QUEUE_CLOSE = "queue_close"
+_FUTURE_RESULT = "fut_result"
+_FUTURE_EXCEPTION = "fut_exception"
 
 
 def _get(queue: mp.Queue, timeout) -> object:
@@ -208,9 +214,17 @@ class ProcessGroupDummy(ProcessGroup):
 
 
 class BabyWork(Work):
-    def __init__(self, tx: mp.Queue, rx: mp.Queue, op_id: int, timeout: float):
+    def __init__(
+        self,
+        pg: "ProcessGroupBaby",
+        tx: mp.Queue,
+        rx: mp.Queue,
+        op_id: int,
+        timeout: float,
+    ):
         super().__init__()
 
+        self._pg = pg
         self._tx = tx
         self._rx = rx
         self._op_id = op_id
@@ -220,6 +234,9 @@ class BabyWork(Work):
         self._tx.put(("wait", self._op_id), timeout=self._timeout)
         assert _get(self._rx, self._timeout) == self._op_id
         return True
+
+    def get_future(self) -> Future:
+        return self._pg._get_future(self._op_id)
 
 
 class BabyWorkNCCL(BabyWork):
@@ -255,6 +272,8 @@ class ProcessGroupBaby(ProcessGroup):
         self._p = None
         self._tx = None
         self._rx = None
+        self._future_queue = None
+        self._future_thread = None
 
         self._timeout = timeout
 
@@ -264,20 +283,46 @@ class ProcessGroupBaby(ProcessGroup):
 
         self._world_size = world_size
 
+        if self._tx is not None:
+            self._tx.close()
+        if self._rx is not None:
+            self._rx.close()
+        if self._future_queue is not None:
+            self._future_queue.put(_QUEUE_CLOSE)
+            self._future_queue.close()
+
         ctx = mp.get_context("spawn")
         self._tx = ctx.Queue()
         self._rx = ctx.Queue()
 
+        # futures need thread to fire callbacks
+        self._future_queue = ctx.Queue()
+        # this lock needs to be held when manipulating _futures
+        self._futures_lock = threading.Lock()
+        self._futures = {}
+        self._future_thread = threading.Thread(
+            target=self._future_handler,
+            args=(self._future_queue,),
+            daemon=True,
+        )
+        self._future_thread.start()
+
         self._p = ctx.Process(
             target=self._worker,
-            args=(store_addr, rank, world_size, self._tx, self._rx),
+            args=(store_addr, rank, world_size, self._tx, self._rx, self._future_queue),
             daemon=True,
         )
         self._p.start()
 
     @classmethod
     def _worker(
-        cls, store_addr: str, rank: int, world_size: int, rx: mp.Queue, tx: mp.Queue
+        cls,
+        store_addr: str,
+        rank: int,
+        world_size: int,
+        rx: mp.Queue,
+        tx: mp.Queue,
+        future_queue: mp.Queue,
     ) -> None:
         try:
             store = create_store(store_addr)
@@ -291,14 +336,27 @@ class ProcessGroupBaby(ProcessGroup):
                 op = rx.get()
                 cmd = op[0]
                 if cmd == "func":
-                    func, args, kwargs = op[1:]
-                    work[next_op_id] = getattr(pg, func)(*args, **kwargs)
+                    func_name, args, kwargs = op[1:]
+                    fn = getattr(pg, func_name)
+                    work[next_op_id] = fn(*args, **kwargs)
                     tx.put(next_op_id)
                     next_op_id += 1
                 elif cmd == "wait":
                     op_id = op[1]
                     work[op_id].wait()
                     del work[op_id]
+                    tx.put(op_id)
+                elif cmd == "future":
+                    op_id = op[1]
+
+                    def callback(fut: Future):
+                        try:
+                            fut.wait()
+                            future_queue.put((op_id, _FUTURE_RESULT, None))
+                        except Exception as e:
+                            future_queue.put((op_id, _FUTURE_EXCEPTION, e))
+
+                    work[op_id].get_future().add_done_callback(callback)
                     tx.put(op_id)
                 elif cmd == "synchronize":
                     # CUDA only, use events instead of waiting on CPU
@@ -322,12 +380,41 @@ class ProcessGroupBaby(ProcessGroup):
             logger.exception("worker errored")
             tx.put(e)
 
+    def _future_handler(self, future_queue: mp.Queue) -> None:
+        try:
+            while True:
+                cmd = future_queue.get()
+                if cmd == _QUEUE_CLOSE:
+                    break
+                op_id, mode, data = cmd
+                with self._futures_lock:
+                    fut = self._futures[op_id]
+                    del self._futures[op_id]
+                if mode == _FUTURE_RESULT:
+                    fut.set_result(data)
+                elif mode == _FUTURE_EXCEPTION:
+                    fut.set_exception(data)
+                else:
+                    raise ValueError(f"unknown mode {mode}")
+        except Exception as e:
+            logger.exception(f"got unexpected error in future handler: {e}")
+
+    def _get_future(self, op_id: int) -> Future:
+        with self._futures_lock:
+            fut = Future()
+            self._futures[op_id] = fut
+            self._tx.put(("future", op_id), timeout=self._timeout)
+
+        assert _get(self._rx, self._timeout) == op_id
+        # TODO: return correct tensor instead of None
+        return fut
+
     def _run_func(self, func: str, *args: object, **kwargs: object) -> Work:
         self._tx.put(("func", func, args, kwargs), timeout=self._timeout)
         op_id = _get(self._rx, self._timeout)
         assert isinstance(op_id, int), f"invalid return {op_id}"
         return self.WORK_CLASS(
-            tx=self._tx, rx=self._rx, op_id=op_id, timeout=self._timeout
+            pg=self, tx=self._tx, rx=self._rx, op_id=op_id, timeout=self._timeout
         )
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
@@ -366,7 +453,7 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
     tensors may leak in the current PyTorch implementation. TODO fix
     """
 
-    PG_CLASS = BaseProcessGroupGloo
+    PG_CLASS = BaseProcessGroupNCCL
     WORK_CLASS = BabyWorkNCCL
 
     def getBackendName(self):

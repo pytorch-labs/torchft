@@ -197,6 +197,9 @@ class Manager:
         if not self._use_async_quorum:
             self._quorum_future.result()
 
+            # eagerly apply pending state_dict so we can run the forwards pass
+            self._apply_pending_state_dict()
+
             # we are forcing healing at the beginning so we're in a good state
             # and don't need to zero_grad
             self._healing = False
@@ -236,13 +239,26 @@ class Manager:
             primary_client = ManagerClient(address, timeout=self._timeout)
             checkpoint_server_address = primary_client.checkpoint_address(self._rank)
 
-            state_dict = CheckpointServer.load_from_address(checkpoint_server_address)
-            self._load_state_dict(state_dict["user"])
-            self.load_state_dict(state_dict["torchft"])
+            self._state_dict = CheckpointServer.load_from_address(
+                checkpoint_server_address
+            )
+            self.load_state_dict(self._state_dict["torchft"])
+            # we apply the user state dict only when safe from the main thread
 
             # This isn't strictly needed as loading the state_dict above should
             # restore the correct step but it makes writing tests simpler.
             self._step = max_step
+
+    def _apply_pending_state_dict(self) -> None:
+        assert self._healing, "must be in healing state"
+
+        # synchronize on future
+        self._quorum_future.result()
+
+        assert self._state_dict is not None, "checkpoint was not staged"
+
+        self._load_state_dict(self._state_dict["user"])
+        self._state_dict = None
 
     def should_commit(self) -> bool:
         for work in self._pending_work:
@@ -255,6 +271,10 @@ class Manager:
             work.wait()
 
         self._pending_work = []
+
+        # apply state_dict if healing
+        if self._healing:
+            self._apply_pending_state_dict()
 
         enough_replicas = self._participating_replicas >= self._min_replica_size
         local_should_commit = enough_replicas and not self._errored

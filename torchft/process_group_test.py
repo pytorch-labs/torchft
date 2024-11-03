@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from unittest import TestCase, skipUnless
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 from torch.distributed import TCPStore, ReduceOp
@@ -37,6 +38,7 @@ class ProcessGroupTest(TestCase):
 
         a_work = pg.allreduce([at], ReduceOp.SUM)
         a_work.wait()
+        a_work.get_future().wait()
 
         m = nn.Linear(3, 4)
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
@@ -58,6 +60,7 @@ class ProcessGroupTest(TestCase):
         at = torch.tensor([2], device=device)
         a_work = pg.allreduce([at], ReduceOp.SUM)
         a_work.wait()
+        a_work.get_future().wait()
 
         m = nn.Linear(3, 4).to(device)
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
@@ -95,7 +98,9 @@ class ProcessGroupTest(TestCase):
         b_work = b.allreduce([bt], ReduceOp.SUM)
 
         a_work.wait()
-        b_work.wait()
+        fut = b_work.get_future()
+
+        fut.wait()
 
         torch.testing.assert_close(at, bt)
 
@@ -113,23 +118,25 @@ class ProcessGroupTest(TestCase):
 
         store_addr = f"localhost:{store.port}/prefix"
 
-        device = "cuda"
+        def run(rank: int) -> None:
+            a = ProcessGroupBabyNCCL()
+            a.configure(store_addr, rank, 2)
 
-        a = ProcessGroupBabyNCCL()
-        b = ProcessGroupBabyNCCL()
+            self.assertEqual(a.size(), 2)
 
-        a.configure(store_addr, 0, 2)
-        b.configure(store_addr, 1, 2)
+            at = torch.tensor([rank + 1], device=f"cuda:{rank}")
 
-        self.assertEqual(a.size(), 2)
+            a_work = a.allreduce([at], ReduceOp.SUM)
+            return at, a_work
 
-        at = torch.tensor([1], device=device)
-        bt = torch.tensor([2], device=device)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            a_fut = executor.submit(run, 0)
+            b_fut = executor.submit(run, 1)
 
-        a_work = a.allreduce([at], ReduceOp.SUM)
-        b_work = b.allreduce([bt], ReduceOp.SUM)
+        at, a_work = a_fut.result()
+        bt, b_work = b_fut.result()
 
         a_work.wait()
-        b_work.wait()
+        b_work.get_future().wait()
 
-        torch.testing.assert_close(at, bt)
+        torch.testing.assert_close(at.cpu(), bt.cpu())
