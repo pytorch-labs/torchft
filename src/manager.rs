@@ -12,6 +12,8 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
+use tokio::time::sleep;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
@@ -21,9 +23,9 @@ use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
 use crate::torchftpb::{
     manager_service_server::{ManagerService, ManagerServiceServer},
-    CheckpointAddressRequest, CheckpointAddressResponse, LighthouseQuorumRequest,
-    ManagerQuorumRequest, ManagerQuorumResponse, Quorum, QuorumMember, ShouldCommitRequest,
-    ShouldCommitResponse,
+    CheckpointAddressRequest, CheckpointAddressResponse, LighthouseHeartbeatRequest,
+    LighthouseQuorumRequest, ManagerQuorumRequest, ManagerQuorumResponse, Quorum, QuorumMember,
+    ShouldCommitRequest, ShouldCommitResponse,
 };
 
 #[cfg(not(test))]
@@ -99,6 +101,19 @@ impl Manager {
     }
 
     pub async fn run(self: Arc<Self>) -> Result<()> {
+        let mut set = JoinSet::new();
+
+        set.spawn(self.clone()._run_heartbeat());
+
+        set.spawn(self.clone()._run_grpc());
+
+        while let Some(res) = set.join_next().await {
+            res??;
+        }
+        Ok(())
+    }
+
+    async fn _run_grpc(self: Arc<Self>) -> Result<()> {
         let bind = self.bind.parse()?;
         info!("Manager {} listening on {}", self.replica_id, bind);
 
@@ -107,6 +122,19 @@ impl Manager {
             .serve(bind)
             .await
             .map_err(|e| e.into())
+    }
+
+    async fn _run_heartbeat(self: Arc<Self>) -> Result<()> {
+        let mut client = self.lighthouse_client_new().await?;
+        loop {
+            let request = tonic::Request::new(LighthouseHeartbeatRequest {
+                replica_id: self.replica_id.clone(),
+            });
+
+            let response = client.heartbeat(request).await;
+
+            sleep(Duration::from_millis(100)).await;
+        }
     }
 
     async fn lighthouse_client_new(&self) -> Result<LighthouseServiceClient<Channel>> {
@@ -333,17 +361,14 @@ mod tests {
     #[tokio::test]
     async fn test_should_commit() -> Result<()> {
         let manager = Manager::new(
-            "repid".to_string(),
+            "rep_id".to_string(),
             "lighthouse".to_string(),
             "addr".to_string(),
             "0.0.0.0:29531".to_string(),
             "store_addr".to_string(),
             2,
         );
-        println!("manager spawn");
-        let manager_fut = tokio::spawn(manager.run());
-
-        println!("should_commit1");
+        let manager_fut = tokio::spawn(manager._run_grpc());
 
         let fut_a = tokio::spawn(should_commit(0, true));
         let fut_b = tokio::spawn(should_commit(1, true));
@@ -353,8 +378,6 @@ mod tests {
         assert!(resp_a.should_commit);
         assert!(resp_b.should_commit);
 
-        println!("should_commit2");
-
         let fut_a = tokio::spawn(should_commit(0, true));
         let fut_b = tokio::spawn(should_commit(1, false));
         let resp_a = fut_a.await??;
@@ -362,8 +385,6 @@ mod tests {
 
         assert!(!resp_a.should_commit);
         assert!(!resp_b.should_commit);
-
-        println!("aborting");
 
         manager_fut.abort();
 

@@ -21,7 +21,8 @@ use tonic::{Request, Response, Status};
 
 use crate::torchftpb::{
     lighthouse_service_server::{LighthouseService, LighthouseServiceServer},
-    LighthouseQuorumRequest, LighthouseQuorumResponse, Quorum, QuorumMember,
+    LighthouseHeartbeatRequest, LighthouseHeartbeatResponse, LighthouseQuorumRequest,
+    LighthouseQuorumResponse, Quorum, QuorumMember,
 };
 
 struct QuorumMemberDetails {
@@ -34,6 +35,10 @@ struct State {
     participants: HashMap<String, QuorumMemberDetails>,
     prev_quorum: Option<Quorum>,
     quorum_id: i64,
+
+    // heartbeat information
+    // replica_id -> last heartbeat
+    heartbeats: HashMap<String, Instant>,
 }
 
 pub struct Lighthouse {
@@ -74,6 +79,7 @@ impl Lighthouse {
                 channel: tx,
                 prev_quorum: None,
                 quorum_id: 0,
+                heartbeats: HashMap::new(),
             }),
             opt: opt,
         })
@@ -176,7 +182,7 @@ impl Lighthouse {
         Ok(())
     }
 
-    pub async fn _run_quorum(self: Arc<Self>) -> Result<()> {
+    async fn _run_quorum(self: Arc<Self>) -> Result<()> {
         loop {
             self.clone()._quorum_tick().await?;
 
@@ -184,7 +190,7 @@ impl Lighthouse {
         }
     }
 
-    pub async fn _run_grpc(self: Arc<Self>) -> Result<()> {
+    async fn _run_grpc(self: Arc<Self>) -> Result<()> {
         let bind = self.opt.bind.parse()?;
         info!("Lighthouse listening on {}", bind);
 
@@ -246,6 +252,21 @@ impl LighthouseService for Arc<Lighthouse> {
             quorum: Some(quorum),
         };
 
+        Ok(Response::new(reply))
+    }
+
+    async fn heartbeat(
+        &self,
+        request: Request<LighthouseHeartbeatRequest>,
+    ) -> Result<Response<LighthouseHeartbeatResponse>, Status> {
+        let replica_id = request.into_inner().replica_id;
+
+        {
+            let mut state = self.state.lock().await;
+            state.heartbeats.insert(replica_id, Instant::now());
+        }
+
+        let reply = LighthouseHeartbeatResponse {};
         Ok(Response::new(reply))
     }
 }
@@ -364,18 +385,28 @@ mod tests {
             .await
             .unwrap();
 
-        let request = tonic::Request::new(LighthouseQuorumRequest {
-            requester: Some(QuorumMember {
+        {
+            let request = tonic::Request::new(LighthouseHeartbeatRequest {
                 replica_id: "foo".to_string(),
-                address: "".to_string(),
-                store_address: "".to_string(),
-                step: 10,
-            }),
-        });
+            });
 
-        let response = client.quorum(request).await.unwrap();
-        let quorum = response.into_inner().quorum.unwrap();
-        assert_eq!(quorum.participants.len(), 1);
+            let response = client.heartbeat(request).await.unwrap();
+        }
+
+        {
+            let request = tonic::Request::new(LighthouseQuorumRequest {
+                requester: Some(QuorumMember {
+                    replica_id: "foo".to_string(),
+                    address: "".to_string(),
+                    store_address: "".to_string(),
+                    step: 10,
+                }),
+            });
+
+            let response = client.quorum(request).await.unwrap();
+            let quorum = response.into_inner().quorum.unwrap();
+            assert_eq!(quorum.participants.len(), 1);
+        }
 
         lighthouse_task.abort();
     }

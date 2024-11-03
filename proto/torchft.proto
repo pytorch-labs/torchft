@@ -53,8 +53,15 @@ message LighthouseQuorumResponse {
     Quorum quorum = 1;
 }
 
+message LighthouseHeartbeatRequest {
+    string replica_id = 1;
+}
+
+message LighthouseHeartbeatResponse {}
+
 service LighthouseService {
     rpc Quorum (LighthouseQuorumRequest) returns (LighthouseQuorumResponse);
+    rpc Heartbeat (LighthouseHeartbeatRequest) returns (LighthouseHeartbeatResponse);
 }
 
 message ManagerQuorumRequest {
