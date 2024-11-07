@@ -1,0 +1,38 @@
+<h2>Quorum Status</h2>
+
+Current quorum_id: {{quorum_id}}
+
+<h3>Previous Quorum</h3>
+{% if let Some(prev_quorum) = prev_quorum %}
+
+Previous quorum id: {{prev_quorum.quorum_id}}
+
+<div>
+{% for member in prev_quorum.participants %}
+
+<div class="member">
+  <b>{{ member.replica_id }}</b> <br/>
+  Step: {{ member.step }} <br/>
+  Manager: {{ member.address }} <br/>
+  TCPStore: {{ member.store_address }}
+</div>
+
+{% endfor %}
+</div>
+
+{% endif %}
+
+<h3>Heartbeats</h3>
+
+<ul>
+{% for replica_id in heartbeats.keys() %}
+
+  {% let age = heartbeats[replica_id].elapsed().as_secs_f64() %}
+  <li class="heartbeat">
+    {{ replica_id }}: seen {{ age }}s ago
+  </li>
+
+{% endfor %}
+</ul>
+
+

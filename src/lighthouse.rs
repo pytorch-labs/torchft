@@ -4,18 +4,23 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use core::net::SocketAddr;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Result;
+use askama::Template;
+use axum::{response::Html, routing::get, Router};
+use gethostname::gethostname;
 use log::{error, info};
 use structopt::StructOpt;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
+use tonic::service::Routes;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
@@ -191,11 +196,33 @@ impl Lighthouse {
     }
 
     async fn _run_grpc(self: Arc<Self>) -> Result<()> {
-        let bind = self.opt.bind.parse()?;
-        info!("Lighthouse listening on {}", bind);
+        let bind: SocketAddr = self.opt.bind.parse()?;
+        info!(
+            "Lighthouse listening on: http://{}:{}",
+            gethostname().into_string().unwrap(),
+            bind.port()
+        );
+
+        let self_clone = self.clone();
+
+        // Setup HTTP endpoints
+        let app = Router::new()
+            .route(
+                "/",
+                get(|| async { Html(IndexTemplate {}.render().unwrap()) }),
+            )
+            .route(
+                "/status",
+                get(move || async { self_clone.get_status().await }),
+            );
+
+        // register the GRPC service
+        let routes = Routes::from(app).add_service(LighthouseServiceServer::new(self));
 
         Server::builder()
-            .add_service(LighthouseServiceServer::new(self))
+            // allow non-GRPC connections
+            .accept_http1(true)
+            .add_routes(routes)
             .serve(bind)
             .await
             .map_err(|e| e.into())
@@ -212,6 +239,19 @@ impl Lighthouse {
             res??;
         }
         Ok(())
+    }
+
+    async fn get_status(self: Arc<Self>) -> Html<String> {
+        let template = {
+            let state = self.state.lock().await;
+
+            StatusTemplate {
+                quorum_id: state.quorum_id,
+                prev_quorum: state.prev_quorum.clone(),
+                heartbeats: state.heartbeats.clone(),
+            }
+        };
+        Html(template.render().unwrap())
     }
 }
 
@@ -269,6 +309,18 @@ impl LighthouseService for Arc<Lighthouse> {
         let reply = LighthouseHeartbeatResponse {};
         Ok(Response::new(reply))
     }
+}
+
+#[derive(Template)]
+#[template(path = "index.html")]
+struct IndexTemplate {}
+
+#[derive(Template)]
+#[template(path = "status.html")]
+struct StatusTemplate {
+    prev_quorum: Option<Quorum>,
+    quorum_id: i64,
+    heartbeats: HashMap<String, Instant>,
 }
 
 #[cfg(test)]
