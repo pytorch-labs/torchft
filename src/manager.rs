@@ -23,9 +23,9 @@ use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
 use crate::torchftpb::{
     manager_service_server::{ManagerService, ManagerServiceServer},
-    CheckpointAddressRequest, CheckpointAddressResponse, LighthouseHeartbeatRequest,
-    LighthouseQuorumRequest, ManagerQuorumRequest, ManagerQuorumResponse, Quorum, QuorumMember,
-    ShouldCommitRequest, ShouldCommitResponse,
+    CheckpointAddressRequest, CheckpointAddressResponse, KillRequest, KillResponse,
+    LighthouseHeartbeatRequest, LighthouseQuorumRequest, ManagerQuorumRequest,
+    ManagerQuorumResponse, Quorum, QuorumMember, ShouldCommitRequest, ShouldCommitResponse,
 };
 
 #[cfg(not(test))]
@@ -131,7 +131,7 @@ impl Manager {
                 replica_id: self.replica_id.clone(),
             });
 
-            let response = client.heartbeat(request).await;
+            let _response = client.heartbeat(request).await;
 
             sleep(Duration::from_millis(100)).await;
         }
@@ -333,12 +333,17 @@ impl ManagerService for Arc<Manager> {
         };
         Ok(Response::new(reply))
     }
+
+    async fn kill(&self, request: Request<KillRequest>) -> Result<Response<KillResponse>, Status> {
+        let req = request.into_inner();
+
+        warn!("got kill request: {}", req.msg);
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use tokio::time::sleep;
-
     use super::*;
 
     async fn should_commit(rank: i64, should_commit: bool) -> Result<ShouldCommitResponse> {

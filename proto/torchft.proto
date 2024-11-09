@@ -98,8 +98,14 @@ message ShouldCommitResponse {
     bool should_commit = 1;
 }
 
+message KillRequest {
+    string msg = 1;
+}
+message KillResponse {}
+
 service ManagerService {
     rpc Quorum (ManagerQuorumRequest) returns (ManagerQuorumResponse);
     rpc CheckpointAddress(CheckpointAddressRequest) returns (CheckpointAddressResponse);
     rpc ShouldCommit(ShouldCommitRequest) returns (ShouldCommitResponse);
+    rpc Kill(KillRequest) returns (KillResponse);
 }

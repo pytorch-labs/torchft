@@ -15,6 +15,11 @@ Previous quorum id: {{prev_quorum.quorum_id}}
   Step: {{ member.step }} <br/>
   Manager: {{ member.address }} <br/>
   TCPStore: {{ member.store_address }}
+
+  <button hx-post="/replica/{{member.replica_id}}/kill"
+          hx-trigger="click">
+    Kill
+  </button>
 </div>
 
 {% endfor %}
@@ -28,7 +33,7 @@ Previous quorum id: {{prev_quorum.quorum_id}}
 {% for replica_id in heartbeats.keys() %}
 
   {% let age = heartbeats[replica_id].elapsed().as_secs_f64() %}
-  <li class="heartbeat">
+  <li class="heartbeat {% if heartbeats[replica_id].lt(old_age_threshold) %}old{%endif%}">
     {{ replica_id }}: seen {{ age }}s ago
   </li>
 

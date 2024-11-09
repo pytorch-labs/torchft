@@ -10,9 +10,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use askama::Template;
-use axum::{response::Html, routing::get, Router};
+use axum::{
+    extract::Path,
+    http::StatusCode,
+    response::{Html, IntoResponse},
+    routing::{get, post},
+    Router,
+};
 use gethostname::gethostname;
 use log::{error, info};
 use structopt::StructOpt;
@@ -24,9 +30,10 @@ use tonic::service::Routes;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
+use crate::manager::manager_client_new;
 use crate::torchftpb::{
     lighthouse_service_server::{LighthouseService, LighthouseServiceServer},
-    LighthouseHeartbeatRequest, LighthouseHeartbeatResponse, LighthouseQuorumRequest,
+    KillRequest, LighthouseHeartbeatRequest, LighthouseHeartbeatResponse, LighthouseQuorumRequest,
     LighthouseQuorumResponse, Quorum, QuorumMember,
 };
 
@@ -203,8 +210,6 @@ impl Lighthouse {
             bind.port()
         );
 
-        let self_clone = self.clone();
-
         // Setup HTTP endpoints
         let app = Router::new()
             .route(
@@ -213,7 +218,17 @@ impl Lighthouse {
             )
             .route(
                 "/status",
-                get(move || async { self_clone.get_status().await }),
+                get({
+                    let self_clone = self.clone();
+                    move || async { self_clone.get_status().await }
+                }),
+            )
+            .route(
+                "/replica/:replica_id/kill",
+                post({
+                    let self_clone = self.clone();
+                    move |path| async { self_clone.kill(path).await }
+                }),
             );
 
         // register the GRPC service
@@ -249,9 +264,37 @@ impl Lighthouse {
                 quorum_id: state.quorum_id,
                 prev_quorum: state.prev_quorum.clone(),
                 heartbeats: state.heartbeats.clone(),
+                old_age_threshold: Instant::now()
+                    .checked_sub(Duration::from_secs(1))
+                    .unwrap_or(Instant::now()),
             }
         };
         Html(template.render().unwrap())
+    }
+
+    async fn kill(self: Arc<Self>, Path(replica_id): Path<String>) -> Result<(), AppError> {
+        let addr = 'addr: {
+            let state = self.state.lock().await;
+            if state.prev_quorum.is_none() {
+                return Err(AppError(anyhow!("failed to find replica")));
+            }
+
+            for member in state.prev_quorum.clone().unwrap().participants {
+                if member.replica_id == replica_id {
+                    break 'addr member.address;
+                }
+            }
+            return Err(AppError(anyhow!("failed to find replica")));
+        };
+
+        let mut client = manager_client_new(addr, Duration::from_secs(10)).await?;
+
+        let request = tonic::Request::new(KillRequest {
+            msg: "killed from dashboard".to_string(),
+        });
+        let _resp = client.kill(request).await?;
+
+        Ok(())
     }
 }
 
@@ -318,9 +361,35 @@ struct IndexTemplate {}
 #[derive(Template)]
 #[template(path = "status.html")]
 struct StatusTemplate {
+    old_age_threshold: Instant,
     prev_quorum: Option<Quorum>,
     quorum_id: i64,
     heartbeats: HashMap<String, Instant>,
+}
+
+// Make our own error that wraps `anyhow::Error`.
+struct AppError(anyhow::Error);
+
+// Tell axum how to convert `AppError` into a response.
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Something went wrong: {}", self.0),
+        )
+            .into_response()
+    }
+}
+
+// This enables using `?` on functions that return `Result<_, anyhow::Error>` to turn them into
+// `Result<_, AppError>`. That way you don't need to do that manually.
+impl<E> From<E> for AppError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(err: E) -> Self {
+        Self(err.into())
+    }
 }
 
 #[cfg(test)]
@@ -442,7 +511,7 @@ mod tests {
                 replica_id: "foo".to_string(),
             });
 
-            let response = client.heartbeat(request).await.unwrap();
+            let _response = client.heartbeat(request).await.unwrap();
         }
 
         {
