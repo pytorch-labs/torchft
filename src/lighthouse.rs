@@ -463,6 +463,7 @@ mod tests {
                         address: "".to_string(),
                         store_address: "".to_string(),
                         step: 1,
+                        world_size: 1,
                     },
                 },
             );
@@ -495,6 +496,7 @@ mod tests {
                         address: "".to_string(),
                         store_address: "".to_string(),
                         step: 1,
+                        world_size: 1,
                     },
                 },
             );
@@ -511,6 +513,7 @@ mod tests {
                     address: "".to_string(),
                     store_address: "".to_string(),
                     step: 1,
+                    world_size: 1,
                 }],
                 created: Some(SystemTime::now().into()),
             });
@@ -550,6 +553,7 @@ mod tests {
                     address: "".to_string(),
                     store_address: "".to_string(),
                     step: 10,
+                    world_size: 1,
                 }),
             });
 
@@ -568,12 +572,14 @@ mod tests {
             address: "".to_string(),
             store_address: "".to_string(),
             step: 1,
+            world_size: 1,
         }];
         let b = vec![QuorumMember {
             replica_id: "1".to_string(),
             address: "changed".to_string(),
             store_address: "changed".to_string(),
             step: 1000,
+            world_size: 1,
         }];
 
         // replica_id is the same
@@ -584,6 +590,7 @@ mod tests {
             address: "".to_string(),
             store_address: "".to_string(),
             step: 1,
+            world_size: 1,
         }];
         // replica_id changed
         assert!(quorum_changed(&a, &c));

@@ -40,6 +40,7 @@ message QuorumMember {
     string address = 2;
     string store_address = 3;
     int64 step = 4;
+    uint64 world_size = 5;
 }
 
 message Quorum {

@@ -49,6 +49,7 @@ class Manager:
         store_addr: Optional[str] = None,
         store_port: Optional[int] = None,
         lighthouse_addr: Optional[str] = None,
+        replica_id: Optional[str] = None,
     ) -> None:
         """
         Args:
@@ -62,7 +63,8 @@ class Manager:
             world_size: the replica group local world size
             store_addr: TCPStore address for this replica group
             store_port: TCPStore port for this replica group
-            ligthouse_addr: if rank==0, the address of the lighthouse server
+            lighthouse_addr: if rank==0, the address of the lighthouse server
+            replica_id: if rank==0, the replica_id for this group
         """
         self._load_state_dict = load_state_dict
         self._state_dict = state_dict
@@ -99,7 +101,8 @@ class Manager:
             bind = f"[::]:{port}"
             lighthouse_addr = lighthouse_addr or os.environ["TORCHFT_LIGHTHOUSE"]
 
-            replica_id = str(uuid.uuid4())
+            if replica_id is None:
+                replica_id = str(uuid.uuid4())
             # pyre-fixme[16]: can't find rust module
             self._manager = _Manager(
                 replica_id=replica_id,

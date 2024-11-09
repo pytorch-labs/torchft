@@ -19,7 +19,8 @@ Quorum age:
   <b>{{ member.replica_id }}</b> <br/>
   Step: {{ member.step }} <br/>
   Manager: {{ member.address }} <br/>
-  TCPStore: {{ member.store_address }}
+  TCPStore: {{ member.store_address }} <br/>
+  World size: {{ member.world_size }} <br/>
 
   <button hx-post="/replica/{{member.replica_id}}/kill"
           hx-trigger="click">

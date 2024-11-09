@@ -28,6 +28,9 @@ logging.basicConfig(level=logging.INFO)
 
 
 def main() -> None:
+    REPLICA_GROUP_ID = int(os.environ.get("REPLICA_GROUP_ID", 0))
+    NUM_REPLICA_GROUPS = int(os.environ.get("NUM_REPLICA_GROUPS", 2))
+
     transform = transforms.Compose(
         [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     )
@@ -40,8 +43,8 @@ def main() -> None:
     # majority of groups will be available so few batches will be dropped.
     sampler = DistributedSampler(
         trainset,
-        replica_group=int(os.environ.get("REPLICA_GROUP_ID", 0)),
-        num_replica_groups=int(os.environ.get("NUM_REPLICA_GROUPS", 2)),
+        replica_group=REPLICA_GROUP_ID,
+        num_replica_groups=NUM_REPLICA_GROUPS,
         rank=0,
         # for DDP we can use replica groups of size 1, FSDP/PP/CP would need more.
         num_replicas=1,
@@ -50,7 +53,7 @@ def main() -> None:
     # This uses the torchdata StatefulDataLoader to be able to checkpoint and
     # restore the per worker dataloader position.
     trainloader = StatefulDataLoader(
-        trainset, batch_size=2, shuffle=True, num_workers=2
+        trainset, batch_size=64, shuffle=True, num_workers=2
     )
 
     def load_state_dict(state_dict):
@@ -68,9 +71,10 @@ def main() -> None:
 
     manager = Manager(
         pg=pg,
-        min_replica_size=2,
+        min_replica_size=1,
         load_state_dict=load_state_dict,
         state_dict=state_dict,
+        replica_id=f"train_ddp_{REPLICA_GROUP_ID}",
     )
 
     class Net(nn.Module):

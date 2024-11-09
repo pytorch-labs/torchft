@@ -192,6 +192,7 @@ impl ManagerService for Arc<Manager> {
                         address: self.address.clone(),
                         store_address: self.store_address.clone(),
                         step: req.step,
+                        world_size: self.world_size,
                     }),
                 });
 
