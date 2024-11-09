@@ -110,8 +110,8 @@ class ProcessGroupTest(TestCase):
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3))
 
-    @skipUnless(torch.cuda.is_available(), "needs CUDA")
-    def test_baby_nccl(self) -> None:
+    @skipUnless(torch.cuda.device_count() >= 2, "need two CUDA devices")
+    def test_baby_nccl_2gpu(self) -> None:
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )

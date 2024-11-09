@@ -25,12 +25,17 @@ jobs:
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
       gpu-arch-version: ${{ matrix.gpu-arch-version }}
       script: |
+        set -ex
+
+        # install python and protobuf
         conda create -n venv python=3.10 protobuf -y
         conda activate venv
-
-        yum install -y rust cargo
-
         python -m pip install --upgrade pip
+
+        # install recent version of Rust via rustup
+        curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain=stable --profile=default -y
+        . "$HOME/.cargo/env"
+
         pip install -e .[dev] -v
 
         pytest -v
