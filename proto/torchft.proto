@@ -7,6 +7,8 @@
 syntax = "proto3";
 package torchft;
 
+import "google/protobuf/timestamp.proto";
+
 message RaftMessageRequest {
     // Request message contains the serialized Raft proto message.
     bytes message = 1;
@@ -43,6 +45,7 @@ message QuorumMember {
 message Quorum {
     int64 quorum_id = 1;
     repeated QuorumMember participants = 2;
+    google.protobuf.Timestamp created = 3;
 }
 
 message LighthouseQuorumRequest {

@@ -1,16 +1,21 @@
 <h2>Quorum Status</h2>
 
-Current quorum_id: {{quorum_id}}
+Current quorum_id: {{quorum_id}} <br>
+Next quorum status: {{quorum_status}}
 
 <h3>Previous Quorum</h3>
 {% if let Some(prev_quorum) = prev_quorum %}
 
-Previous quorum id: {{prev_quorum.quorum_id}}
+Previous quorum id: {{prev_quorum.quorum_id}} <br>
+Quorum age:
+{{SystemTime::try_from(prev_quorum.created.unwrap()).unwrap().elapsed().unwrap().as_secs_f64()}}s
 
 <div>
 {% for member in prev_quorum.participants %}
 
-<div class="member">
+<div class="member
+ {% if member.step != max_step %}recovering{% endif %}
+">
   <b>{{ member.replica_id }}</b> <br/>
   Step: {{ member.step }} <br/>
   Manager: {{ member.address }} <br/>
@@ -33,7 +38,9 @@ Previous quorum id: {{prev_quorum.quorum_id}}
 {% for replica_id in heartbeats.keys() %}
 
   {% let age = heartbeats[replica_id].elapsed().as_secs_f64() %}
-  <li class="heartbeat {% if heartbeats[replica_id].lt(old_age_threshold) %}old{%endif%}">
+  <li class="heartbeat
+    {% if heartbeats[replica_id].lt(old_age_threshold) %}old{%endif%}
+  ">
     {{ replica_id }}: seen {{ age }}s ago
   </li>
 
