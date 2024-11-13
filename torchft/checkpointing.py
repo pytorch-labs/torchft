@@ -16,6 +16,11 @@ import torch
 logger: logging.Logger = logging.getLogger(__name__)
 
 
+class IPv6HTTPServer(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+    request_queue_size = 1024
+
+
 class CheckpointServer:
     def __init__(self, state_dict) -> None:
         self._checkpoint_lock = threading.Lock()
@@ -53,7 +58,7 @@ class CheckpointServer:
                 self.wfile.write(msg.encode())
 
         server_address = ("", 0)
-        self._server = ThreadingHTTPServer(server_address, RequestHandler)
+        self._server = IPv6HTTPServer(server_address, RequestHandler)
         logger.info(f"Started CheckpointServer on {self.address()}...")
 
         self._thread = threading.Thread(
