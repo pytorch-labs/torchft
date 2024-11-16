@@ -24,6 +24,10 @@ import torch.distributed as dist
 from torch.distributed.distributed_c10d import Work
 import torch
 import torch.multiprocessing as mp
+from torch._C._distributed_c10d import (
+    _register_process_group,
+    _unregister_process_group,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +66,11 @@ def create_store(store_addr: str) -> Store:
 
 
 class ProcessGroup(BaseProcessGroup):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        self._group_name = None
+
     def configure(self, store_addr: str, rank: int, world_size: int) -> None:
         raise NotImplementedError("not implemented")
 
@@ -89,6 +98,34 @@ class ProcessGroup(BaseProcessGroup):
 
     def getBackendName(self) -> str:
         raise NotImplementedError("not implemented")
+
+    def register(self, name: str) -> None:
+        """
+        Registers the process group with the global registry. This enables usage
+        with things like functional_collectives which are compilable.
+
+        This should only be called once.
+
+        Args:
+            name: name must be a unique name for this process group
+        """
+
+        self._group_name = f"{self.getBackendName()}:{name}"
+        _register_process_group(self.group_name, self)
+
+    @property
+    def group_name(self) -> str:
+        if self._group_name is None:
+            raise ValueError("ProcessGroup name not set")
+        return self._group_name
+
+    def unregister(self) -> None:
+        """
+        Unregisters the process group with the global registry.
+
+        Must be registered first.
+        """
+        _unregister_process_group(self.group_name)
 
 
 class ProcessGroupWrapper(ProcessGroup):

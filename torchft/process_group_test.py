@@ -11,6 +11,10 @@ import torch
 from torch.distributed import TCPStore, ReduceOp
 import torch.distributed as dist
 from torch import nn
+from torch._C._distributed_c10d import (
+    _resolve_process_group,
+)
+from torch.distributed import _functional_collectives
 
 from torchft.process_group import (
     ProcessGroupBabyGloo,
@@ -140,3 +144,27 @@ class ProcessGroupTest(TestCase):
         b_work.get_future().wait()
 
         torch.testing.assert_close(at.cpu(), bt.cpu())
+
+    def test_device_mesh(self) -> None:
+        pass
+
+    def test_functional_collectives(self) -> None:
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        store_addr = f"localhost:{store.port}/prefix"
+
+        pg = ProcessGroupGloo()
+        pg.configure(store_addr, 0, 1)
+
+        pg.register("test_func_col")
+
+        self.assertEqual(pg.group_name, "torchft-gloo:test_func_col")
+
+        self.assertIs(_resolve_process_group(pg.group_name), pg)
+
+        try:
+            t = torch.zeros(10)
+            _functional_collectives.all_reduce(t, "sum", pg).wait()
+        finally:
+            pg.unregister()
