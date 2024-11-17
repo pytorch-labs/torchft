@@ -6,6 +6,7 @@
 
 from unittest import TestCase, skipUnless
 from concurrent.futures import ThreadPoolExecutor
+import os
 
 import torch
 from torch.distributed import TCPStore, ReduceOp
@@ -15,6 +16,7 @@ from torch._C._distributed_c10d import (
     _resolve_process_group,
 )
 from torch.distributed import _functional_collectives
+from torch.distributed.device_mesh import init_device_mesh
 
 from torchft.process_group import (
     ProcessGroupBabyGloo,
@@ -23,6 +25,7 @@ from torchft.process_group import (
     ProcessGroupNCCL,
     ProcessGroupDummy,
     ProcessGroup,
+    extend_device_mesh,
 )
 
 
@@ -146,7 +149,24 @@ class ProcessGroupTest(TestCase):
         torch.testing.assert_close(at.cpu(), bt.cpu())
 
     def test_device_mesh(self) -> None:
-        pass
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = str(0)
+        os.environ["RANK"] = str(0)
+        os.environ["WORLD_SIZE"] = str(1)
+
+        mesh_1d = init_device_mesh("cpu", mesh_shape=(1,), mesh_dim_names=("tp",))
+
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        store_addr = f"localhost:{store.port}/prefix"
+
+        pg = ProcessGroupGloo()
+        pg.register("test_device_mesh")
+        pg.configure(store_addr, 0, 1)
+
+        mesh_2d = extend_device_mesh(mesh_1d, pg)
+        assert mesh_2d.ndim == 2
 
     def test_functional_collectives(self) -> None:
         store = TCPStore(

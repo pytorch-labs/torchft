@@ -4,30 +4,33 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from abc import ABC
 import logging
-from typing import Type, List, Optional, Callable, Tuple
-from datetime import timedelta
 import threading
+from abc import ABC
+from datetime import timedelta
+from typing import Callable, List, Optional, Tuple, Type
 
-from torch.futures import Future
-from torch.distributed import (
-    ProcessGroup as BaseProcessGroup,
-    Store,
-    TCPStore,
-    PrefixStore,
-    BroadcastOptions,
-    ProcessGroupGloo as BaseProcessGroupGloo,
-    ProcessGroupNCCL as BaseProcessGroupNCCL,
-)
-import torch.distributed as dist
-from torch.distributed.distributed_c10d import Work
 import torch
+import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch._C._distributed_c10d import (
     _register_process_group,
     _unregister_process_group,
 )
+from torch.distributed import (
+    BroadcastOptions,
+    DeviceMesh,
+    get_rank,
+    PrefixStore,
+    ProcessGroup as BaseProcessGroup,
+    ProcessGroupGloo as BaseProcessGroupGloo,
+    ProcessGroupNCCL as BaseProcessGroupNCCL,
+    Store,
+    TCPStore,
+)
+from torch.distributed.distributed_c10d import _world, Work
+
+from torch.futures import Future
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +115,16 @@ class ProcessGroup(BaseProcessGroup):
 
         self._group_name = f"{self.getBackendName()}:{name}"
         _register_process_group(self.group_name, self)
+
+        # This is needed for DeviceMesh to work
+        # Resizable worlds don't fit well into DeviceMesh so we register a world
+        # size 1 PG.
+        _world.pg_map[self] = (None, None)
+        _world.pg_names[self] = self._group_name
+        _world.pg_to_tag[self] = self._group_name
+        _world.tags_to_pg.setdefault(self._group_name, []).append(self)
+        # these PGs can be resized so we lie about the rank mapping
+        _world.pg_group_ranks[self] = {get_rank(): 0}
 
     @property
     def group_name(self) -> str:
@@ -495,3 +508,32 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
 
     def getBackendName(self):
         return "torchft-baby-nccl"
+
+
+def extend_device_mesh(
+    mesh: DeviceMesh, pg: ProcessGroup, name: str = "dp", dim: int = 0
+) -> DeviceMesh:
+    """
+    This is a helper method to extend a traditional DeviceMesh with a torchft ProcessGroup for usage with DeviceMesh based APIs such as FSDPv2 with hybrid sharding.
+
+    Resizable PGs aren't natively supported by DeviceMesh so we lie to
+    DeviceMesh and say the PG is world size 1. This is fine as long as any
+    numeric scaling is handled at the PG level.
+
+    Args:
+        mesh: The DeviceMesh to extend
+        pg: The ProcessGroup to add to the mesh
+        name: The name of the new dimension
+        dim: The dimension to add the ProcessGroup to
+    """
+    groups = mesh.get_all_groups()
+    groups.insert(dim, pg)
+    mesh_dim_names = list(mesh.mesh_dim_names)
+    mesh_dim_names.insert(dim, name)
+
+    return DeviceMesh.from_group(
+        group=groups,
+        device_type=mesh.device_type,
+        mesh=mesh.mesh.unsqueeze(dim),
+        mesh_dim_names=mesh_dim_names,
+    )
