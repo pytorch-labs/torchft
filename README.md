@@ -30,11 +30,18 @@ greatly improve efficiency by avoiding stop the world training on errors.
 
 ## Installation
 
+Before proceeding, ensure you have Rust installed on your system. Note that the Rust versions available in many conda environments may be outdated. To install the latest version of Rust, we recommend downloading it directly from the official website as shown in the below command:
+```sh
+$ curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
+```
+
 ```sh
 $ pip install .
 ```
 
 This uses pyo3+maturin to build the package, you'll need maturin installed.
+
+If the installation command fails to invoke `cargo update` due to an inability to fetch the manifest, it may be caused by the `proxy`, `proxySSLCert`, and `proxySSLKey` settings in your .`gitconfig` file affecting the `cargo` command. To resolve this issue, try temporarily removing these fields from your `.gitconfig` before running the installation command.
 
 To install in editable mode w/ the Rust extensions you can use the normal pip install command:
 
