@@ -124,7 +124,11 @@ class ProcessGroup(BaseProcessGroup):
         ) -> ProcessGroup:
             return self
 
-        dist.Backend.register_backend(group_name, create_pg)
+        if torch.cuda.is_available():
+            devices = ["cuda", "cpu"]
+        else:
+            devices = ["cpu"]
+        dist.Backend.register_backend(group_name, create_pg, devices=devices)
 
         return dist.new_group(
             ranks=[dist.get_rank()],
