@@ -102,7 +102,7 @@ class ProcessGroup(BaseProcessGroup):
     def getBackendName(self) -> str:
         raise NotImplementedError("not implemented")
 
-    def register(self, name: str) -> None:
+    def register(self, name: str) -> BaseProcessGroup:
         """
         Registers the process group with the global registry. This enables usage
         with things like functional_collectives which are compilable.
@@ -113,18 +113,25 @@ class ProcessGroup(BaseProcessGroup):
             name: name must be a unique name for this process group
         """
 
-        self._group_name = f"{self.getBackendName()}:{name}"
-        _register_process_group(self.group_name, self)
+        group_name = f"{self.getBackendName()}:{name}"
 
-        # This is needed for DeviceMesh to work
+        # This is needed for DeviceMesh and functional collectives to work.
         # Resizable worlds don't fit well into DeviceMesh so we register a world
         # size 1 PG.
-        _world.pg_map[self] = (None, None)
-        _world.pg_names[self] = self._group_name
-        _world.pg_to_tag[self] = self._group_name
-        _world.tags_to_pg.setdefault(self._group_name, []).append(self)
-        # these PGs can be resized so we lie about the rank mapping
-        _world.pg_group_ranks[self] = {get_rank(): 0}
+
+        def create_pg(
+            prefix_store: PrefixStore, rank: int, world_size: int, timeout: float
+        ) -> ProcessGroup:
+            return self
+
+        dist.Backend.register_backend(group_name, create_pg)
+
+        return dist.new_group(
+            ranks=[dist.get_rank()],
+            backend=group_name,
+            group_desc=group_name,
+            timeout=timedelta(seconds=60.0),  # this timeout isn't used
+        )
 
     @property
     def group_name(self) -> str:
@@ -132,13 +139,16 @@ class ProcessGroup(BaseProcessGroup):
             raise ValueError("ProcessGroup name not set")
         return self._group_name
 
+    def _set_group_name(self, name: str) -> None:
+        self._group_name = name
+
     def unregister(self) -> None:
         """
         Unregisters the process group with the global registry.
 
         Must be registered first.
         """
-        _unregister_process_group(self.group_name)
+        dist.destroy_process_group(self)
 
 
 class ProcessGroupWrapper(ProcessGroup):

@@ -4,29 +4,33 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from unittest import TestCase, skipUnless
-from concurrent.futures import ThreadPoolExecutor
 import os
+from concurrent.futures import ThreadPoolExecutor
+from unittest import skipUnless, TestCase
 
 import torch
-from torch.distributed import TCPStore, ReduceOp
 import torch.distributed as dist
 from torch import nn
-from torch._C._distributed_c10d import (
-    _resolve_process_group,
-)
-from torch.distributed import _functional_collectives
+from torch._C._distributed_c10d import _resolve_process_group
+from torch.distributed import _functional_collectives, ReduceOp, TCPStore
 from torch.distributed.device_mesh import init_device_mesh
 
 from torchft.process_group import (
+    extend_device_mesh,
+    ProcessGroup,
     ProcessGroupBabyGloo,
     ProcessGroupBabyNCCL,
+    ProcessGroupDummy,
     ProcessGroupGloo,
     ProcessGroupNCCL,
-    ProcessGroupDummy,
-    ProcessGroup,
-    extend_device_mesh,
 )
+
+
+def dummy_init_pg() -> None:
+    if not dist.is_initialized():
+        dist.init_process_group(
+            backend="gloo", rank=0, world_size=1, store=dist.HashStore()
+        )
 
 
 class ProcessGroupTest(TestCase):
@@ -168,18 +172,20 @@ class ProcessGroupTest(TestCase):
         mesh_2d = extend_device_mesh(mesh_1d, pg)
         assert mesh_2d.ndim == 2
 
+        pg.unregister()
+
     def test_functional_collectives(self) -> None:
+        dummy_init_pg()
+
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
         store_addr = f"localhost:{store.port}/prefix"
 
-        pg = ProcessGroupGloo()
+        pg = ProcessGroupGloo().register("test_func_col")
         pg.configure(store_addr, 0, 1)
 
-        pg.register("test_func_col")
-
-        self.assertEqual(pg.group_name, "torchft-gloo:test_func_col")
+        self.assertEqual(pg.group_name, str(dist.get_pg_count() - 1))
 
         self.assertIs(_resolve_process_group(pg.group_name), pg)
 
