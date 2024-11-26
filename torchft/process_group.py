@@ -20,7 +20,7 @@ import logging
 import threading
 from abc import ABC
 from datetime import timedelta
-from typing import TYPE_CHECKING, Dict, List, Optional, Type
+from typing import Dict, List, Optional, Tuple, Type, TYPE_CHECKING, Union
 
 import torch
 import torch.distributed as dist
@@ -31,15 +31,16 @@ import torch.multiprocessing as mp
 from torch.distributed import (
     BroadcastOptions,
     DeviceMesh,
+    get_rank,
+    init_device_mesh,
     PrefixStore,
     ProcessGroup as BaseProcessGroup,
     ProcessGroupGloo as BaseProcessGroupGloo,
     ProcessGroupNCCL as BaseProcessGroupNCCL,
     Store,
     TCPStore,
-    get_rank,
 )
-from torch.distributed.distributed_c10d import Work, _world
+from torch.distributed.distributed_c10d import _world, Work
 from torch.futures import Future
 
 if TYPE_CHECKING:
@@ -130,17 +131,7 @@ class ProcessGroup(BaseProcessGroup):
     def getBackendName(self) -> str:
         raise NotImplementedError("not implemented")
 
-    def register(self, name: str) -> "ProcessGroup":
-        """
-        Registers the process group with the global registry. This enables usage
-        with things like functional_collectives which are compilable.
-
-        This should only be called once.
-
-        Args:
-            name: name must be a unique name for this process group
-        """
-
+    def _register(self, name: str) -> str:
         group_name = f"{self.getBackendName()}:{name}"
 
         # This is needed for DeviceMesh and functional collectives to work.
@@ -157,6 +148,21 @@ class ProcessGroup(BaseProcessGroup):
         else:
             devices = ["cpu"]
         dist.Backend.register_backend(group_name, create_pg, devices=devices)
+
+        return group_name
+
+    def register(self, name: str) -> "ProcessGroup":
+        """
+        Registers the process group with the global registry. This enables usage
+        with things like functional_collectives which are compilable.
+
+        This should only be called once.
+
+        Args:
+            name: name must be a unique name for this process group
+        """
+
+        group_name = self._register(name)
 
         return dist.new_group(
             ranks=[dist.get_rank()],
@@ -244,9 +250,9 @@ class ProcessGroupGloo(ProcessGroupWrapper):
     This is a reconfigurable version of ProcessGroupGloo.
     """
 
-    PG_CLASS: Type[BaseProcessGroup] = (
-        BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
-    )
+    PG_CLASS: Type[
+        BaseProcessGroup
+    ] = BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
 
     def getBackendName(self) -> str:
         return "torchft-gloo"
@@ -263,9 +269,9 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
     abort when reconfiguring, we need to ensure this is safe.
     """
 
-    PG_CLASS: Type[BaseProcessGroup] = (
-        BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
-    )
+    PG_CLASS: Type[
+        BaseProcessGroup
+    ] = BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
 
     def getBackendName(self) -> str:
         return "torchft-nccl"
@@ -496,6 +502,9 @@ class ManagedProcessGroup(ProcessGroupWrapper):
     def size(self) -> int:
         return self._manager.num_participants()
 
+    def getBackendName(self) -> str:
+        return self._manager._pg.getBackendName()
+
 
 class _BabyWork(Work):
     def __init__(
@@ -689,7 +698,6 @@ class ProcessGroupBaby(ProcessGroup):
             logger.exception(f"got unexpected error in future handler: {e}")
 
     def _get_future(self, op_id: int) -> Future[object]:
-
         with self._futures_lock:
             fut = Future()  # pyre-fixme[29]: is not a function
             self._futures[op_id] = fut
@@ -737,9 +745,9 @@ class ProcessGroupBabyGloo(ProcessGroupBaby):
     ProcessGroupBabyNCCL.
     """
 
-    PG_CLASS: Type[BaseProcessGroup] = (
-        BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
-    )
+    PG_CLASS: Type[
+        BaseProcessGroup
+    ] = BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
 
     def getBackendName(self) -> str:
         return "torchft-baby-gloo"
@@ -761,9 +769,9 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
     tensors may leak in the current PyTorch implementation. TODO fix
     """
 
-    PG_CLASS: Type[BaseProcessGroup] = (
-        BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
-    )
+    PG_CLASS: Type[
+        BaseProcessGroup
+    ] = BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
     WORK_CLASS = _BabyWorkNCCL
 
     def getBackendName(self) -> str:
@@ -796,4 +804,185 @@ def extend_device_mesh(
         device_type=mesh.device_type,
         mesh=mesh.mesh.unsqueeze(dim),
         mesh_dim_names=tuple(mesh_dim_names),
+    )
+
+
+class ManagedDeviceMesh(DeviceMesh):
+    def __init__(
+        self,
+        mesh: Optional[DeviceMesh],
+        mesh_dim_names: Tuple[str],
+        replicate_pg: ManagedProcessGroup,
+        replicate_dim: int,
+        parent: Optional["ManagedDeviceMesh"],
+    ):
+        self.mesh = mesh
+        self.mesh_dim_names = mesh_dim_names
+        self.replicate_pg = replicate_pg
+        self.replicate_dim = replicate_dim
+        self.replicate_dim_name = mesh_dim_names[replicate_dim]
+        self.parent = parent
+        self.flatten_meshes = {}
+
+    def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
+        if isinstance(mesh_dim_names, str):
+            if mesh_dim_names == self.replicate_dim_name:
+                return ManagedDeviceMesh(
+                    mesh=None,
+                    mesh_dim_names=(mesh_dim_names,),
+                    replicate_pg=self.replicate_pg,
+                    replicate_dim=0,
+                    parent=self,
+                )
+            elif mesh_dim_names in self.flatten_meshes:
+                return self.flatten_meshes[mesh_dim_names]
+            else:
+                return self.mesh[mesh_dim_names]
+        else:
+            assert isinstance(mesh_dim_names, tuple)
+            if self.replicate_dim_name in mesh_dim_names:
+                return self.mesh[mesh_dim_names]
+            else:
+                return ManagedDeviceMesh(
+                    self.mesh[mesh_dim_names],
+                    mesh_dim_names,
+                    self.replicate_pg,
+                    mesh_dim_name.index(self.replicate_dim_name),
+                    parent=self,
+                )
+
+    def get_group(self, mesh_dim: Optional[str] = None) -> BaseProcessGroup:
+        if mesh_dim is None:
+            assert self.mesh is None
+            return self.replicate_pg
+        elif mesh_dim == self.replicate_dim_name:
+            return self.replicate_pg
+        else:
+            return self.mesh.get_group(mesh_dim)
+
+    def _flatten(self, mesh_dim_name: str) -> "DeviceMesh":
+        flatten_mesh = _FlattenDeviceMesh(self)
+        if self.parent is None:
+            self.flatten_meshes[mesh_dim_name] = flatten_mesh
+        else:
+            self.parent.flatten_meshes[mesh_dim_name] = flatten_mesh
+        return flatten_mesh
+
+    def size(self, mesh_dim: Optional[int] = None) -> int:
+        if mesh_dim is None:
+            if self.mesh is None:
+                return self.replicate_pg.size()
+            else:
+                return self.mesh.size() * self.replicate_pg.size()
+        elif mesh_dim == self.replicate_dim:
+            return self.replicate_pg.size()
+        else:
+            return self.mesh.size(mesh_dim)
+
+    @property
+    def ndim(self) -> int:
+        return self.mesh.ndim + 1
+
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        ret = list(self.mesh.shape)
+        ret.insert(self.replicate_dim, self.replicate_pg.size())
+
+    def get_rank(self) -> int:
+        return self.mesh.get_rank()
+
+    def get_local_rank(self, mesh_dim: Optional[Union[int, str]] = None) -> int:
+        if mesh_dim is None:
+            if self.mesh is None:
+                return get_rank(self.replicate_pg)
+
+            assert self.replicate_dim == 0, "replicate_dim must be the first one"
+            other_dim_size = self.mesh.size()
+            other_dim_rank = self.mesh.get_local_rank()
+            replicate_pg_rank = get_rank(self.replicate_pg)
+            return other_dim_size * replicate_pg_rank + other_dim_rank
+        elif mesh_dim in (self.replicate_dim, self.replicate_dim_name):
+            return get_rank(self.replicate_pg)
+        else:
+            return self.mesh.get_local_rank(mesh_dim)
+
+    def get_all_groups(self) -> List[ProcessGroup]:
+        raise NotImplementedError
+
+
+class _FlattenDeviceMesh(DeviceMesh):
+    def __init__(self, managed_mesh: ManagedDeviceMesh):
+        self.managed_mesh = managed_mesh
+
+    def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
+        raise NotImplementedError
+
+    def get_group(self, mesh_dim: Optional[str] = None) -> BaseProcessGroup:
+        raise NotImplementedError
+
+    def _flatten(self, mesh_dim_name: str) -> "DeviceMesh":
+        raise NotImplementedError
+
+    def size(self, mesh_dim: Optional[int] = None) -> int:
+        assert mesh_dim is None
+        return self.managed_mesh.size()
+
+    @property
+    def ndim(self) -> int:
+        raise NotImplementedError
+
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        raise NotImplementedError
+
+    def get_rank(self) -> int:
+        raise NotImplementedError
+
+    def get_local_rank(self, mesh_dim: Optional[Union[int, str]] = None) -> int:
+        assert mesh_dim is None
+        return self.managed_mesh.get_local_rank()
+
+    def get_all_groups(self) -> List[ProcessGroup]:
+        raise NotImplementedError
+
+
+def ft_init_device_mesh(
+    *,
+    device_type: str,
+    mesh_shape: Tuple[int, ...],
+    mesh_dim_names: Tuple[str, ...],
+    replicate_dim: int,
+    manager: "Manager",
+):
+    # We have to lie DeviceMesh that the replicate_dim has only
+    # 1 rank.
+    _mesh_shape = list(mesh_shape)
+    _mesh_shape.pop(replicate_dim)
+    _mesh_dim_names = list(mesh_dim_names)
+    _mesh_dim_names.pop(replicate_dim)
+    mesh = init_device_mesh(
+        device_type,
+        mesh_shape=tuple(_mesh_shape),
+        mesh_dim_names=tuple(_mesh_dim_names),
+    )
+
+    if device_type == "cpu":
+        pg = ProcessGroupGloo()
+    elif device_type == "cuda":
+        pg = ProcessGroupNCCL()
+    else:
+        raise ValueError()
+
+    manager._pg = pg
+    replicate_pg = ManagedProcessGroup(manager)
+    # We have to use MultiProcessTestCase, otherwise c10d will complain
+    # the same backend has been registered.
+    replicate_pg.register(mesh_dim_names[replicate_dim])
+
+    return ManagedDeviceMesh(
+        mesh=mesh,
+        mesh_dim_names=mesh_dim_names,
+        replicate_pg=replicate_pg,
+        replicate_dim=replicate_dim,
+        parent=None,
     )
