@@ -13,7 +13,12 @@ import torch.distributed as dist
 from torch import nn
 from torch._C._distributed_c10d import _resolve_process_group
 from torch.distributed import _functional_collectives, ReduceOp, TCPStore
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import _mesh_resources, init_device_mesh
+
+from torch.testing._internal.common_distributed import (
+    MultiProcessTestCase,
+)
+from torch.testing._internal.common_utils import FILE_SCHEMA
 
 from torchft.process_group import (
     extend_device_mesh,
@@ -194,3 +199,60 @@ class ProcessGroupTest(TestCase):
             _functional_collectives.all_reduce(t, "sum", pg).wait()
         finally:
             pg.unregister()
+
+
+class ProcessGroupMPTest(MultiProcessTestCase):
+    @property
+    def world_size(self):
+        return 4
+
+    def setUp(self):
+        super().setUp()
+        # Set TORCH_NCCL_DESYNC_DEBUG=0 to disable the NCCL `workCleanupLoop()`,
+        # which can cause unit test flakiness:
+        # https://github.com/pytorch/pytorch/issues/90848
+        os.environ["TORCH_NCCL_DESYNC_DEBUG"] = "0"
+        self._spawn_processes()
+
+    def test_init_device_mesh(self) -> None:
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = str(12345)
+        os.environ["RANK"] = str(self.rank)
+        os.environ["WORLD_SIZE"] = str(4)
+
+        def ft_init_device_mesh(device, mesh_shape, mesh_dim_names, replicate_dim):
+            if device == "cpu":
+                pg = ProcessGroupGloo()
+            elif device == "cuda":
+                pg = ProcessGroupNCCL()
+            else:
+                raise ValueError()
+
+            # We have to use MultiProcessTestCase, otherwise c10d will complain
+            # the same backend has been registered.
+            backend_name = pg._register(mesh_dim_names[replicate_dim])
+            # This currently doesn't work with NCCL as DeviceMesh will ignore
+            # `_set_mesh_dim_group_options()` and just use `split_group()`.
+            # We will need to change DeviceMesh to use `new_group()` instead of
+            # `split_group()` when backend is not None.
+            _mesh_resources._set_mesh_dim_group_options(
+                replicate_dim, backend_name, None
+            )
+            device_mesh = init_device_mesh(
+                device, mesh_shape=mesh_shape, mesh_dim_names=mesh_dim_names
+            )
+            # We need an API to clear the mesh_dim_group_options because it will
+            # affect the following flatten() API.
+            return device_mesh
+
+        device_mesh = ft_init_device_mesh(
+            "cpu", mesh_shape=(2, 2), mesh_dim_names=("dp", "tp"), replicate_dim=0
+        )
+
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        store_addr = f"localhost:{store.port}/prefix"
+        pg = device_mesh.get_group("dp")
+        pg.configure(store_addr, 0, 1)
+        pg.unregister()

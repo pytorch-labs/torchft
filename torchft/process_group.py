@@ -102,17 +102,7 @@ class ProcessGroup(BaseProcessGroup):
     def getBackendName(self) -> str:
         raise NotImplementedError("not implemented")
 
-    def register(self, name: str) -> BaseProcessGroup:
-        """
-        Registers the process group with the global registry. This enables usage
-        with things like functional_collectives which are compilable.
-
-        This should only be called once.
-
-        Args:
-            name: name must be a unique name for this process group
-        """
-
+    def _register(self, name: str) -> str:
         group_name = f"{self.getBackendName()}:{name}"
 
         # This is needed for DeviceMesh and functional collectives to work.
@@ -129,6 +119,20 @@ class ProcessGroup(BaseProcessGroup):
         else:
             devices = ["cpu"]
         dist.Backend.register_backend(group_name, create_pg, devices=devices)
+
+        return group_name
+
+    def register(self, name: str) -> BaseProcessGroup:
+        """
+        Registers the process group with the global registry. This enables usage
+        with things like functional_collectives which are compilable.
+
+        This should only be called once.
+
+        Args:
+            name: name must be a unique name for this process group
+        """
+        group_name = self._register(name)
 
         return dist.new_group(
             ranks=[dist.get_rank()],
