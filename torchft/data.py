@@ -4,10 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+Data
+====
+
+This module provides helper classes to implement fault tolerant data loaders.
+
+We recommend using torchdata's StatefulDataLoader to checkpoint each replica's
+dataloader frequently to avoid duplicate batches.
+"""
+
 from typing import Optional
 
-from torch.utils import data
 import torch.distributed as dist
+
+from torch.utils import data
 
 
 class DistributedSampler(data.distributed.DistributedSampler):

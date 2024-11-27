@@ -4,6 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+Process Groups
+=========================
+
+This module implements fault tolerant process groups that can be reconfigured
+and resized at runtime.
+
+These extend the standard PyTorch ProcessGroup API and can be used in most
+places that would accept a standard process group. As these can change size at
+runtime users need to take care to not assume a static rank or world size.
+"""
+
 import logging
 import threading
 from abc import ABC
@@ -47,9 +59,9 @@ def _get(queue: mp.Queue, timeout) -> object:
     return v
 
 
-def create_store(store_addr: str) -> Store:
+def create_store_client(store_addr: str) -> Store:
     """
-    Creates a PrefixStore(TCPStore(...)) from an address in the format:
+    Creates a PrefixStore(TCPStore(...)) client from an address in the format:
 
     host:port/prefix
 
@@ -75,6 +87,17 @@ class ProcessGroup(BaseProcessGroup):
         self._group_name = None
 
     def configure(self, store_addr: str, rank: int, world_size: int) -> None:
+        """
+        This reconfigures the ProcessGroup to use a new store, rank and world size.
+
+        Every time this is called it must be provided with a unique prefixed
+        store address. I.e. localhost:1234/my/prefix/1
+
+        Args:
+            store_addr: address of the store to use
+            rank: rank of this process
+            world_size: world size of this process group
+        """
         raise NotImplementedError("not implemented")
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
@@ -171,7 +194,7 @@ class ProcessGroupWrapper(ProcessGroup):
                 self._pg.abort()
             self._pg = None
 
-        store = create_store(store_addr)
+        store = create_store_client(store_addr)
 
         # TODO: set global timeout
         self._pg = self.PG_CLASS(store, rank, world_size)
@@ -222,7 +245,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         return "torchft-nccl"
 
 
-class DummyWork(dist._Work):
+class _DummyWork(dist._Work):
     def __init__(self, result):
         super().__init__()
         self.result_ = result
@@ -238,10 +261,14 @@ class DummyWork(dist._Work):
 
 class ProcessGroupDummy(ProcessGroup):
     """
-    This PG only supports world_size of 1
+    This process group discards all data passed to it and returns success. This
+    is intended for rare cases where we want to discard certain operations
+    without modifying the underlying library.
+
+    This PG only supports world_size of 1.
     """
 
-    def __init__(self, rank, world):
+    def __init__(self, rank: int, world: int) -> None:
         super().__init__(rank, world)
         assert rank == 0
         assert world == 1
@@ -253,7 +280,7 @@ class ProcessGroupDummy(ProcessGroup):
         self._work = []
 
     def broadcast(self, tensor_list, opts):
-        res = DummyWork(tensor_list)
+        res = _DummyWork(tensor_list)
         self._work.append(res)
         return res
 
@@ -261,12 +288,12 @@ class ProcessGroupDummy(ProcessGroup):
         for o, i in zip(output_tensors[0], input_tensor):
             o.copy_(i)
 
-        res = DummyWork(output_tensors)
+        res = _DummyWork(output_tensors)
         self._work.append(res)
         return res
 
     def allreduce(self, tensors, opts):
-        res = DummyWork(tensors)
+        res = _DummyWork(tensors)
         self._work.append(res)
         return res
 
@@ -277,7 +304,7 @@ class ProcessGroupDummy(ProcessGroup):
         return "torchft-dummy"
 
 
-class BabyWork(Work):
+class _BabyWork(Work):
     def __init__(
         self,
         pg: "ProcessGroupBaby",
@@ -303,7 +330,7 @@ class BabyWork(Work):
         return self._pg._get_future(self._op_id)
 
 
-class BabyWorkNCCL(BabyWork):
+class _BabyWorkNCCL(_BabyWork):
     def wait(self) -> bool:
         self._tx.put(("synchronize", self._op_id), timeout=self._timeout)
         op_id, event = _get(self._rx, self._timeout)
@@ -326,7 +353,7 @@ class ProcessGroupBaby(ProcessGroup):
     """
 
     PG_CLASS: Type[BaseProcessGroup]
-    WORK_CLASS: Type[BabyWork] = BabyWork
+    WORK_CLASS: Type[_BabyWork] = _BabyWork
 
     def __init__(self, timeout: float = 60.0) -> None:
         super().__init__(0, 1)
@@ -389,7 +416,7 @@ class ProcessGroupBaby(ProcessGroup):
         future_queue: mp.Queue,
     ) -> None:
         try:
-            store = create_store(store_addr)
+            store = create_store_client(store_addr)
 
             pg = cls.PG_CLASS(store, rank, world_size)
 
@@ -495,6 +522,13 @@ class ProcessGroupBaby(ProcessGroup):
 
 
 class ProcessGroupBabyGloo(ProcessGroupBaby):
+    """
+    This is a ProcessGroup that runs Gloo in a subprocess.
+
+    For most use cases you should prefer ProcessGroupGloo or
+    ProcessGroupBabyNCCL.
+    """
+
     PG_CLASS = BaseProcessGroupGloo
 
     def getBackendName(self):
@@ -518,7 +552,7 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
     """
 
     PG_CLASS = BaseProcessGroupNCCL
-    WORK_CLASS = BabyWorkNCCL
+    WORK_CLASS = _BabyWorkNCCL
 
     def getBackendName(self):
         return "torchft-baby-nccl"

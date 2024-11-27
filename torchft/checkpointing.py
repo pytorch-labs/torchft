@@ -4,25 +4,44 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+"""
+Checkpointing
+==============
+
+This module implements methods for checkpointing and resuming training from a checkpoint.
+"""
+
+import io
+import logging
 import socket
 import threading
-import logging
-import io
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Callable
 
 import torch
 
 logger: logging.Logger = logging.getLogger(__name__)
 
 
-class IPv6HTTPServer(ThreadingHTTPServer):
+class _IPv6HTTPServer(ThreadingHTTPServer):
     address_family = socket.AF_INET6
     request_queue_size = 1024
 
 
 class CheckpointServer:
-    def __init__(self, state_dict) -> None:
+    """
+    This is an HTTP server that can be used to transfer checkpoints
+    between workers.
+
+    This allows for fast recovery of workers by fetching the current weights
+    from an existing worker.
+
+    Args:
+        state_dict: a callable that returns the state dict to be transferred
+    """
+
+    def __init__(self, state_dict: Callable[[], object]) -> None:
         self._checkpoint_lock = threading.Lock()
         self._disallowed = False
         self._step = -1
@@ -58,7 +77,7 @@ class CheckpointServer:
                 self.wfile.write(msg.encode())
 
         server_address = ("", 0)
-        self._server = IPv6HTTPServer(server_address, RequestHandler)
+        self._server = _IPv6HTTPServer(server_address, RequestHandler)
         logger.info(f"Started CheckpointServer on {self.address()}...")
 
         self._thread = threading.Thread(
@@ -70,6 +89,12 @@ class CheckpointServer:
 
     @classmethod
     def load_from_address(cls, address: str) -> object:
+        """
+        Loads a checkpoint from the given address.
+
+        Args:
+            address: the HTTP address to load the checkpoint from
+        """
         logger.info(f"fetching checkpoint from {address}")
 
         with urllib.request.urlopen(address) as f:
@@ -79,6 +104,14 @@ class CheckpointServer:
         return torch.load(reader, weights_only=True)
 
     def address(self) -> str:
+        """
+        Returns the HTTP address to fetch a checkpoint from this server at the current step.
+
+        Format: http://host:port/checkpoint/1234
+
+        Returns:
+            an HTTP address
+        """
         port = self._server.socket.getsockname()[1]
         return f"http://{socket.gethostname()}:{port}/checkpoint/{self._step}"
 
@@ -89,11 +122,22 @@ class CheckpointServer:
             logger.exception("got exception in checkpoint server")
 
     def disallow_checkpoint(self) -> None:
+        """
+        Disallows serving the checkpoint.
+
+        All requests will block until allow_checkpoint is called.
+        """
         if not self._disallowed:
             self._disallowed = True
             self._checkpoint_lock.acquire()
 
     def allow_checkpoint(self, step: int) -> None:
+        """
+        Allows serving the checkpoint with the specified step number.
+
+        Args:
+            step: the step number to serve
+        """
         self._step = step
 
         if self._disallowed:
@@ -101,4 +145,7 @@ class CheckpointServer:
             self._checkpoint_lock.release()
 
     def shutdown(self) -> None:
+        """
+        Shutdown the server.
+        """
         self._server.shutdown()

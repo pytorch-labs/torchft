@@ -4,19 +4,26 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+Distributed Data Parallel
+==========================
+
+This module implements a DistributedDataParallel wrapper that works with the
+Manager to provide fault tolerance.
+"""
+
 import os
-from typing import Optional, TYPE_CHECKING
 import sys
+from typing import Optional, TYPE_CHECKING
 from unittest.mock import patch
 
-from torch.nn import parallel
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch.distributed.algorithms.join import Joinable
-import torch.distributed as dist
-from torchft.process_group import ProcessGroup
-from torchft.process_group import ProcessGroupGloo
-from torchft.process_group import ProcessGroupDummy
+
+from torch.nn import parallel
+from torchft.process_group import ProcessGroup, ProcessGroupDummy, ProcessGroupGloo
 
 if TYPE_CHECKING:
     from torchft.manager import Manager
@@ -28,6 +35,7 @@ class DistributedDataParallel(parallel.DistributedDataParallel):
     compatible with torchft.
 
     Important notes:
+
     * This requires states to be synced on step 0 using an external mechanism
       rather than an internal broadcast (torchft.Manager will do this).
     * Using non-basic features of the DDP may cause your model to catch fire as
@@ -55,6 +63,11 @@ class DistributedDataParallel(parallel.DistributedDataParallel):
 class PureDistributedDataParallel(nn.Module):
     """
     A pure Python reimplementation of the DDP wrapper.
+
+    We recommend using DistributedDataParallel instead of this class.
+
+    This calls one allreduce per gradient tensor and doesn't use a reducer. This
+    may be very slow for real models.
     """
 
     def __init__(self, manager: "Manager", module: nn.Module):

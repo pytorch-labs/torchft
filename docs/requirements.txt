@@ -1,0 +1,8 @@
+sphinx==5.0.1
+-e git+http://github.com/pytorch/pytorch_sphinx_theme.git#egg=pytorch_sphinx_theme
+sphinxcontrib.katex
+matplotlib
+papermill
+ipykernel
+ipython_genutils
+jinja2<=3.0.3

@@ -4,22 +4,43 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
-import uuid
-import socket
-from typing import Dict, Optional, List
-import time
+"""
+Manager
+=========
+
+This module implements the Manager that manages the full fault tolerant training
+loop.
+
+The Manager is responsible for managing the
+full training loop, communicating with the Lighthouse server to figure out
+quorum, reconfiguring the ProcessGroups and restoring checkpoint state when
+recovering.
+
+This uses wrapper classes to wrap the standard PyTorch Optimizer and Module
+classes to provide fault tolerance. These wrappers indented to add fault
+tolerance with minimal changes to the users modeling code and training loop.
+
+This is designed to work with the standard PyTorch DistributedDataParallel module
+and Hybrid FSDP.
+
+"""
+
 import logging
+import os
+import socket
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from typing import Dict, List, Optional
 
 import torch
-from torch.distributed import TCPStore, PrefixStore, Work, ReduceOp
+from torch.distributed import PrefixStore, ReduceOp, TCPStore, Work
 from torch.optim import Optimizer
+from torchft.checkpointing import CheckpointServer
 
 # pyre-fixme[21]: can't find rust module
 from torchft.torchft import Manager as _Manager, ManagerClient
-from torchft.checkpointing import CheckpointServer
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -131,9 +152,29 @@ class Manager:
         self._should_step = True
 
     def shutdown(self) -> None:
+        """
+        Shutdown the manager and checkpoint server.
+        """
         self._ckpt_server.shutdown()
 
     def allreduce_grad(self, grad: torch.Tensor) -> torch.futures.Future[torch.Tensor]:
+        """
+        Allreduce the gradient and return a Future that will be completed when
+        the gradient is ready.
+
+        This will automatically scale the gradient by 1 / world_size.
+
+        If an error occurs during the allreduce:
+
+        * The Future will be completed with no error and instead tracked asynchronously.
+        * After the first error, all subsequent allreduce_grad calls will be noops and immediately return.
+        * The grad tensor must be zeroed before being used as it may be corrupted.
+
+        Args:
+            grad: the gradient to allreduce
+        Returns:
+            a Future that will be completed with the allreduced gradient
+        """
         if self._errored:
             fut = torch.futures.Future()
             fut.set_result(grad)
@@ -185,6 +226,16 @@ class Manager:
             return fut
 
     def step(self) -> None:
+        """
+        .. note::
+            We recommend using the :py:class:`torchft.optim.OptimizerWrapper` instead of calling this directly.
+
+        Must be called before the forwards pass of each step.
+
+        Computes a new quorum (potentially asynchronously) and readies the
+        manager for a new step.
+        """
+
         if self._should_step:
             self._step += 1
             self._batches_committed += self._participating_replicas
@@ -264,6 +315,24 @@ class Manager:
         self._state_dict = None
 
     def should_commit(self) -> bool:
+        """
+        .. note::
+            We recommend using the :py:class:`torchft.optim.OptimizerWrapper` instead of calling this directly.
+
+        Must be called after the backwards pass completes but before stepping the optimizer.
+
+        The optimizer must only be stepped if this returns True.
+
+        This must be called on all workers within a replica group. This uses a
+        collective to ensure all workers within a replica return the same value.
+        If an error occurs on any worker, all workers will return False.
+        Different replica groups may return different values.
+
+        This should only be called once per step.
+
+        Returns:
+            True if the optimizer should be stepped, False otherwise
+        """
         for work in self._pending_work:
             # check at the beginning of since .wait() may trigger errors
             if self._errored:
@@ -296,10 +365,27 @@ class Manager:
         return should_commit
 
     def load_state_dict(self, state_dict: Dict[str, int]) -> None:
+        """
+        Load the state dict from a previous checkpoint.
+
+        This will restore the step count and internal metadata.
+
+        Args:
+            state_dict: the state dict to load
+        """
         self._step = state_dict["step"]
         self._batches_committed = state_dict["batches_committed"]
 
     def state_dict(self) -> Dict[str, int]:
+        """
+        Get the state dict for this manager.
+
+        This can be used to checkpoint the state of the manager to restore
+        from a previous checkpoint.
+
+        Returns:
+            the state dict for this manager
+        """
         return {"step": self._step, "batches_committed": self._batches_committed}
 
     def current_step(self) -> int:
@@ -307,6 +393,9 @@ class Manager:
         Get the current step count.
 
         This number is incremented on .step()
+
+        Returns:
+            the current step count
         """
         return self._step
 
@@ -317,5 +406,8 @@ class Manager:
         10 examples depending on batch size.
 
         This number is incremented on .step()
+
+        Returns:
+            the total number of batches committed
         """
         return self._batches_committed

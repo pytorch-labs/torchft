@@ -4,7 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import TYPE_CHECKING, Optional
+"""
+Optimizers
+============
+
+This module implements an optimizer wrapper that works with the Manager to provide fault tolerance.
+
+"""
+
+from typing import Optional, TYPE_CHECKING
 
 from torch.optim import Optimizer
 
@@ -13,6 +21,16 @@ if TYPE_CHECKING:
 
 
 class OptimizerWrapper(Optimizer):
+    """
+    This wraps any provided optimizer and in conjunction with the manager will provide fault tolerance.
+
+    zero_grad() must be called at the start of the forwards pass and step() must
+    be called at the end of the backwards pass.
+
+    Depending on the state of the manager, the optimizer will either commit the
+    gradients to the wrapped optimizer or ignore them.
+    """
+
     def __init__(self, manager: "Manager", optim: Optimizer) -> None:
         self.optim = optim
         self.manager = manager

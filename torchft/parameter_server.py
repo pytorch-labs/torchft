@@ -4,14 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from abc import ABC, abstractmethod
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+"""
+Parameter Servers
+==================
+
+This module provides a prototype implementation of a fault tolerant parameter server bulit on the reconfigurable ProcessGroups.
+"""
+
+import json
+import logging
 import socket
 import threading
-import uuid
-import logging
 import urllib.request
-import json
+import uuid
+from abc import ABC, abstractmethod
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from torch.distributed import TCPStore
 
@@ -87,7 +94,7 @@ class ParameterServer(ABC):
                     self.connection.close()
 
                     # hijack thread for the session
-                    ps.handle_session(session_id, store_addr)
+                    ps._handle_session(session_id, store_addr)
                 except Exception:
                     logger.exception(
                         f"got exception in request handler for {self.path}"
@@ -109,6 +116,11 @@ class ParameterServer(ABC):
     def address(self) -> str:
         """
         Returns the HTTP address to create a new session on this server.
+
+        Format: http://host:port/new_session
+
+        Returns:
+            an HTTP address
         """
         port = self._server.socket.getsockname()[1]
         return f"http://{socket.gethostname()}:{port}/new_session"
@@ -125,6 +137,11 @@ class ParameterServer(ABC):
         """
         Create a new non-configured ProcessGroup for the ParameterServer to
         configure when setting up server and client connections.
+
+        Must be implemented by subclasses.
+
+        Returns:
+            a new ProcessGroup
         """
         ...
 
@@ -150,7 +167,7 @@ class ParameterServer(ABC):
 
         return pg
 
-    def handle_session(self, session_id: str, store_addr: str) -> None:
+    def _handle_session(self, session_id: str, store_addr: str) -> None:
         pg = self.new_process_group()
         # paramter server is always rank 0
         pg.configure(store_addr, rank=0, world_size=2)
@@ -168,6 +185,8 @@ class ParameterServer(ABC):
         have to create a new session.
 
         The server rank is 0 and the client rank is 1.
+
+        Must be implemented by subclasses.
 
         Args:
             session_id: a unique uuid for this session

@@ -1,0 +1,54 @@
+name: Docs
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: "3.10"
+          architecture: x64
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install Dependencies
+        run: |
+          set -eux
+
+          sudo apt-get install -y protobuf-compiler
+
+          pip install .[dev] -v
+
+          pip install -r docs/requirements.txt
+      - name: Build Sphinx Docs
+        run: |
+          set -eux
+
+          cd docs
+          make html
+      - name: Upload static files as artifact
+        id: deployment
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/build/html/
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    if: ${{ github.ref == 'refs/heads/main' }}
+    permissions:
+      pages: write      # to deploy to Pages
+      id-token: write   # to verify the deployment originates from an appropriate source
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
