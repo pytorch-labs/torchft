@@ -5,14 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 from unittest import TestCase
-from unittest.mock import patch, create_autospec, MagicMock
+from unittest.mock import create_autospec, MagicMock, patch
 
 import torch
 from torch.distributed import TCPStore
-
-from torchft.torchft import ManagerClient
 from torchft.manager import Manager, MANAGER_ADDR_KEY
 from torchft.process_group import ProcessGroup
+
+from torchft.torchft import ManagerClient
 
 
 class TestManager(TestCase):
@@ -129,6 +129,8 @@ class TestManager(TestCase):
         manager.step()
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         self.assertFalse(manager._healing)
+        self.assertTrue(manager.is_participating())
+        self.assertEqual(manager.num_participants(), 2)
         self.assertTrue(manager.should_commit())
 
         self.assertEqual(manager._quorum_id, 123)
@@ -164,6 +166,8 @@ class TestManager(TestCase):
         manager.step()
         manager._quorum_future.result()
         self.assertTrue(manager._healing)
+        self.assertFalse(manager.is_participating())
+        self.assertEqual(manager.num_participants(), 1)
 
         grad = torch.tensor([1.0])
         manager.allreduce_grad(grad).wait()

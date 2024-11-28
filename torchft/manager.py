@@ -32,7 +32,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, TYPE_CHECKING
 
 import torch
 from torch.distributed import PrefixStore, ReduceOp, TCPStore, Work
@@ -41,6 +41,9 @@ from torchft.checkpointing import CheckpointServer
 
 # pyre-fixme[21]: can't find rust module
 from torchft.torchft import Manager as _Manager, ManagerClient
+
+if TYPE_CHECKING:
+    from torchft.process_group import ProcessGroup
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -58,9 +61,9 @@ class Manager:
 
     def __init__(
         self,
-        pg,
-        load_state_dict,
-        state_dict,
+        pg: "ProcessGroup",
+        load_state_dict: Callable[[object], None],
+        state_dict: Callable[[], object],
         min_replica_size: int,
         port: int = MANAGER_DEFAULT_PORT,
         use_async_quorum: bool = True,
@@ -182,8 +185,7 @@ class Manager:
 
         self._quorum_future.result()
 
-        if self._healing:
-            assert self._use_async_quorum
+        if not self.is_participating():
             grad.zero_()
 
         # TODO: increase timeout when waiting when healing
@@ -209,7 +211,7 @@ class Manager:
                     self._errored = True
                     return grad
 
-                grad /= self._participating_replicas
+                grad /= self.num_participants()
 
                 return grad
 
@@ -411,3 +413,26 @@ class Manager:
             the total number of batches committed
         """
         return self._batches_committed
+
+    def num_participants(self) -> int:
+        """
+        Get the number of participants in the current quorum.
+
+        This is the number of replicas participating in the current step.
+
+        Returns:
+            the number of participants in the current quorum
+        """
+        return self._participating_replicas
+
+    def is_participating(self) -> bool:
+        """
+        Get whether this replica is participating in the current quorum.
+
+        Returns:
+            whether this replica is participating in the current quorum
+        """
+        if self._healing:
+            assert self._use_async_quorum
+            return False
+        return True
