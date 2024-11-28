@@ -178,7 +178,7 @@ class Manager:
         Returns:
             a Future that will be completed with the allreduced gradient
         """
-        if self._errored:
+        if self.errored():
             fut = torch.futures.Future()
             fut.set_result(grad)
             return fut
@@ -195,37 +195,80 @@ class Manager:
             work = self._pg.allreduce([grad], ReduceOp.SUM)
             fut = work.get_future()
 
-            # schedule error handling and grad normalization as a continuation
+            # schedule grad normalization as a continuation
             # on the Future
             def callback(
                 fut: torch.futures.Future[List[torch.Tensor]],
             ) -> torch.futures.Future[torch.Tensor]:
                 nonlocal grad
 
-                try:
-                    val = fut.value()
-                except Exception:
-                    logger.exception(
-                        "got exception in all reduce future -- skipping remaining"
-                    )
-                    self._errored = True
-                    return grad
+                fut.value()
 
                 grad /= self.num_participants()
 
                 return grad
 
             fut = fut.then(callback)
-            self._pending_work.append(fut)
+            fut = self.wrap_future(fut, grad)
             return fut
 
         except Exception as e:
-            logger.exception("got exception in all reduce -- skipping remaining")
-            self._errored = True
+            logger.exception(f"got exception in all reduce -- skipping remaining: {e}")
+            self.report_error()
 
             fut = torch.futures.Future()
             fut.set_result(grad)
             return fut
+
+    def report_error(self) -> None:
+        """
+        Report an error to the manager.
+
+        This will cause the manager to skip the current step and will be
+        reconfigured on the next step.
+
+        This should be called when an error occurs that leads to a corrupted
+        gradient that needs to be discarded.
+        """
+        self._errored = True
+
+    def errored(self) -> bool:
+        """
+        Get whether an error has occurred.
+
+        Returns:
+            whether an error has occurred
+        """
+        return self._errored
+
+    def wrap_future(self, fut: torch.futures.Future[object], default: object) -> None:
+        """
+        Wrap a Future and swallow any errors that occur and report them to the manager.
+
+        If an error occurs, the Future will be completed with the default value.
+
+        Args:
+            fut: the Future to wrap
+            default: the default value to complete the Future with if an error occurs
+        """
+
+        # schedule error handling and grad normalization as a continuation
+        # on the Future
+        def callback(
+            fut: torch.futures.Future[List[torch.Tensor]],
+        ) -> torch.futures.Future[torch.Tensor]:
+            nonlocal default
+
+            try:
+                return fut.value()
+            except Exception as e:
+                logger.exception(f"got exception in future -- skipping remaining: {e}")
+                self.report_error()
+                return default
+
+        fut = fut.then(callback)
+        self._pending_work.append(fut)
+        return fut
 
     def step(self) -> None:
         """

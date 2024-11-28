@@ -10,7 +10,7 @@ from unittest.mock import create_autospec, MagicMock, patch
 import torch
 from torch.distributed import TCPStore
 from torchft.manager import Manager, MANAGER_ADDR_KEY
-from torchft.process_group import ProcessGroup
+from torchft.process_group import _DummyWork, ProcessGroup
 
 from torchft.torchft import ManagerClient
 
@@ -311,3 +311,40 @@ class TestManager(TestCase):
         manager.step()
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         self.assertTrue(manager.should_commit())
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_manager_report_error(self, client_mock) -> None:
+        manager = self._create_manager()
+
+        self.assertFalse(manager.errored())
+        manager.report_error()
+        self.assertTrue(manager.errored())
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_manager_wrap_future(self, client_mock) -> None:
+        manager = self._create_manager()
+
+        self.assertFalse(manager.errored())
+
+        fut = torch.futures.Future()
+        wrapped_fut = manager.wrap_future(fut, 2)
+
+        fut.set_exception(RuntimeError("injected failure"))
+
+        self.assertEqual(wrapped_fut.value(), 2)
+        self.assertTrue(manager.errored())
+        self.assertEqual(manager._pending_work, [wrapped_fut])
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_manager_numerics(self, client_mock) -> None:
+        manager = self._create_manager()
+
+        manager._quorum_future = MagicMock()
+        manager._participating_replicas = 5
+        self.assertEqual(manager.num_participants(), 5)
+        manager._pg.allreduce.return_value = _DummyWork(None)
+
+        fut = torch.futures.Future()
+        fut = manager.allreduce_grad(torch.tensor([1.0]))
+        result = fut.value()
+        torch.testing.assert_close(result, torch.tensor([1.0 / 5]))
