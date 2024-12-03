@@ -20,3 +20,14 @@ the entire training job.
     data
     checkpointing
     parameter_server
+
+
+License
+---------
+
+torchft is BSD 3-Clause licensed. See `LICENSE <https://github.com/pytorch-labs/torchft/blob/main/LICENSE>`_ for more details.
+
+Copyright © Meta Platforms, Inc
+
+* `Terms of Use <https://opensource.fb.com/legal/terms>`_
+* `Privacy Policy <https://opensource.fb.com/legal/privacy>`_
