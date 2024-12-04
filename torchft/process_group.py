@@ -20,7 +20,7 @@ import logging
 import threading
 from abc import ABC
 from datetime import timedelta
-from typing import Callable, List, Optional, Tuple, Type
+from typing import Callable, List, Optional, Tuple, Type, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -43,6 +43,9 @@ from torch.distributed import (
 from torch.distributed.distributed_c10d import _world, Work
 
 from torch.futures import Future
+
+if TYPE_CHECKING:
+    from torchft.manager import Manager
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +180,9 @@ class ProcessGroup(BaseProcessGroup):
         """
         dist.destroy_process_group(self)
 
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}()"
+
 
 class ProcessGroupWrapper(ProcessGroup):
     PG_CLASS: Type[BaseProcessGroup]
@@ -184,11 +190,15 @@ class ProcessGroupWrapper(ProcessGroup):
     This is a wrapper around any ProcessGroup with a reconfiguration method.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, pg: Optional[ProcessGroup] = None) -> None:
         super().__init__(0, 1)
-        self._pg = None
+        self._pg = pg
 
     def configure(self, store_addr: str, rank: int, world_size: int) -> None:
+        if isinstance(self._pg, ProcessGroup):
+            self._pg.configure(store_addr, rank, world_size)
+            return
+
         if self._pg is not None:
             if hasattr(self._pg, "abort"):
                 self._pg.abort()
@@ -215,6 +225,12 @@ class ProcessGroupWrapper(ProcessGroup):
 
     def size(self) -> int:
         return self._pg.size()
+
+    def parent(self) -> ProcessGroup:
+        return self._pg
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(pg={self._pg})"
 
 
 class ProcessGroupGloo(ProcessGroupWrapper):
@@ -252,7 +268,7 @@ class _DummyWork(dist._Work):
         self.future_ = torch.futures.Future()
         self.future_.set_result(result)
 
-    def wait(self, timeout):
+    def wait(self, timeout=None):
         return True
 
     def get_future(self):
@@ -278,6 +294,10 @@ class ProcessGroupDummy(ProcessGroup):
         self.wait_count = 0
         self.get_future_count = 0
         self._work = []
+        self.configure_count = 0
+
+    def configure(self, store_addr: str, rank: int, world_size: int) -> None:
+        self.configure_count += 1
 
     def broadcast(self, tensor_list, opts):
         res = _DummyWork(tensor_list)
@@ -302,6 +322,102 @@ class ProcessGroupDummy(ProcessGroup):
 
     def getBackendName(self):
         return "torchft-dummy"
+
+
+class _ErrorSwallowingWork(Work):
+    def __init__(
+        self,
+        pg: "ErrorSwallowingProcessGroup",
+        work: Work,
+        default_result: object,
+    ):
+        super().__init__()
+
+        self._pg = pg
+        self._work = work
+        self._default_result = default_result
+
+    def wait(self, timeout=None) -> bool:
+        try:
+            self._work.wait()
+        except Exception as e:
+            self._pg.report_error(e)
+
+        return True
+
+    def get_future(self) -> Future:
+        fut = self._work.get_future()
+
+        # schedule error handling as a continuation on the Future
+        def callback(
+            fut: torch.futures.Future[List[torch.Tensor]],
+        ) -> torch.futures.Future[torch.Tensor]:
+            try:
+                return fut.value()
+            except Exception as e:
+                logger.exception(f"got exception in future -- skipping remaining: {e}")
+                self._pg.report_error(e)
+                return self._default_result
+
+        fut = fut.then(callback)
+        return fut
+
+
+class ErrorSwallowingProcessGroupWrapper(ProcessGroupWrapper):
+    """
+    This is a wrapper around any ProcessGroup that will swallow errors and
+    return dummy results on error.
+
+    This is intended to allow handling errors outside of the training loop to
+    avoid having to modify modeling code to support error handling.
+
+    After an error occurs all future operations will be skipped until the
+    process group is reconfigured via ``configure``.
+    """
+
+    def __init__(self, pg: ProcessGroup) -> None:
+        super().__init__(pg)
+
+        self._error = None
+
+    def configure(self, store_addr: str, rank: int, world_size: int) -> None:
+        self._error = None
+
+        super().configure(store_addr, rank, world_size)
+
+    def report_error(self, e: Exception) -> None:
+        """
+        Report an error to this process group. This will cause all future
+        operations to be skipped until the process group is reconfigured via
+        ``configure``.
+
+        Args:
+            e: exception to report
+        """
+        self._error = e
+
+    def error(self) -> Optional[Exception]:
+        """
+        Returns the error that was reported to this process group.
+
+        Returns:
+            exception that was reported
+        """
+        return self._error
+
+    def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
+        if self._error is not None:
+            return _DummyWork(tensors)
+
+        try:
+            return _ErrorSwallowingWork(
+                self,
+                super().allreduce(tensors, opts),
+                tensors,
+            )
+        except Exception as e:
+            self.report_error(e)
+            return _DummyWork(tensors)
 
 
 class _BabyWork(Work):

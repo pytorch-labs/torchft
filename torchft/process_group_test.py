@@ -7,6 +7,7 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from unittest import skipUnless, TestCase
+from unittest.mock import Mock
 
 import torch
 import torch.distributed as dist
@@ -16,6 +17,9 @@ from torch.distributed import _functional_collectives, ReduceOp, TCPStore
 from torch.distributed.device_mesh import init_device_mesh
 
 from torchft.process_group import (
+    _DummyWork,
+    _ErrorSwallowingWork,
+    ErrorSwallowingProcessGroupWrapper,
     extend_device_mesh,
     ProcessGroup,
     ProcessGroupBabyGloo,
@@ -23,6 +27,7 @@ from torchft.process_group import (
     ProcessGroupDummy,
     ProcessGroupGloo,
     ProcessGroupNCCL,
+    ProcessGroupWrapper,
 )
 
 
@@ -194,3 +199,35 @@ class ProcessGroupTest(TestCase):
             _functional_collectives.all_reduce(t, "sum", pg).wait()
         finally:
             pg.unregister()
+
+    def test_process_group_wrapper(self) -> None:
+        pg = ProcessGroupDummy(0, 1)
+        wrapper = ProcessGroupWrapper(pg)
+        self.assertIs(wrapper.parent(), pg)
+
+        wrapper.configure("addr", 0, 1)
+        self.assertEqual(pg.configure_count, 1)
+
+        self.assertEqual(repr(wrapper), "ProcessGroupWrapper(pg=ProcessGroupDummy())")
+
+    def test_error_swallowing_process_group_wrapper(self) -> None:
+        pg = ProcessGroupDummy(0, 1)
+        wrapper = ErrorSwallowingProcessGroupWrapper(pg)
+        self.assertIs(wrapper.parent(), pg)
+
+        t = torch.zeros(10)
+        work = wrapper.allreduce([t], ReduceOp.SUM)
+        self.assertIsInstance(work, _ErrorSwallowingWork)
+        work.wait()
+        fut = work.get_future()
+        fut.wait()
+
+        err = RuntimeError("test")
+        wrapper.report_error(err)
+        self.assertEqual(wrapper.error(), err)
+
+        work = wrapper.allreduce([t], ReduceOp.SUM)
+        self.assertIsInstance(work, _DummyWork)
+        work.wait()
+        fut = work.get_future()
+        fut.wait()

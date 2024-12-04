@@ -252,8 +252,7 @@ class Manager:
             default: the default value to complete the Future with if an error occurs
         """
 
-        # schedule error handling and grad normalization as a continuation
-        # on the Future
+        # schedule error handling as a continuation on the Future
         def callback(
             fut: torch.futures.Future[List[torch.Tensor]],
         ) -> torch.futures.Future[torch.Tensor]:
