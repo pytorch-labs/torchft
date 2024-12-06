@@ -234,6 +234,14 @@ impl ManagerService for Arc<Manager> {
 
         let primary = max_participants[rank as usize % max_participants.len()];
 
+        let mut max_rank = None;
+        for (i, p) in max_participants.iter().enumerate() {
+            if p.replica_id == self.replica_id {
+                max_rank = Some(i as i64);
+                break;
+            }
+        }
+
         // Decide whether we should be healing:
         // 1. if we're not at the max step
         // 2. if everyone is at the first step and we're not the primary
@@ -251,9 +259,10 @@ impl ManagerService for Arc<Manager> {
             address: primary.address.clone(),
             store_address: primary.store_address.clone(),
             max_step: max_step,
-            num_max: max_participants.len() as i64,
+            max_rank: max_rank,
+            max_world_size: max_participants.len() as i64,
             replica_rank: replica_rank as i64,
-            replica_world: participants.len() as i64,
+            replica_world_size: participants.len() as i64,
             heal: heal,
         };
 

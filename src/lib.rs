@@ -102,7 +102,7 @@ impl ManagerClient {
         rank: i64,
         step: i64,
         checkpoint_server_addr: String,
-    ) -> PyResult<(i64, i64, i64, String, String, i64, i64, bool)> {
+    ) -> PyResult<(i64, i64, i64, String, String, i64, Option<i64>, i64, bool)> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(ManagerQuorumRequest {
                 rank: rank,
@@ -121,11 +121,12 @@ impl ManagerClient {
             Ok((
                 resp.quorum_id,
                 resp.replica_rank,
-                resp.replica_world,
+                resp.replica_world_size,
                 resp.address,
                 resp.store_address,
                 resp.max_step,
-                resp.num_max,
+                resp.max_rank,
+                resp.max_world_size,
                 resp.heal,
             ))
         })

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, create_autospec, patch
 import torch
 from torch.distributed import TCPStore
 
-from torchft.manager import MANAGER_ADDR_KEY, Manager
+from torchft.manager import MANAGER_ADDR_KEY, Manager, WorldSizeMode
 from torchft.process_group import ProcessGroup, _DummyWork
 from torchft.torchft import ManagerClient
 
@@ -20,7 +20,10 @@ class TestManager(TestCase):
     load_state_dict: MagicMock  # pyre-fixme[13]: never initialized
 
     def _create_manager(
-        self, use_async_quorum: bool = True, min_replica_size: int = 2
+        self,
+        use_async_quorum: bool = True,
+        min_replica_size: int = 2,
+        world_size_mode: WorldSizeMode = WorldSizeMode.DYNAMIC,
     ) -> Manager:
         pg = create_autospec(ProcessGroup)
         self.store = TCPStore(
@@ -43,6 +46,7 @@ class TestManager(TestCase):
                 load_state_dict=self.load_state_dict,
                 state_dict=lambda: {},
                 use_async_quorum=use_async_quorum,
+                world_size_mode=world_size_mode,
             )
         return manager
 
@@ -85,7 +89,8 @@ class TestManager(TestCase):
             "manager address",
             f"localhost:{self.store.port}",
             1,  # max_step
-            2,  # num_max
+            1,  # max_rank
+            2,  # max_world_size
             False,  # heal
         )
 
@@ -119,7 +124,8 @@ class TestManager(TestCase):
             "manager address",
             f"localhost:{self.store.port}",
             20,  # max_step
-            2,  # num_max
+            None,  # max_rank
+            2,  # max_world_size
             True,  # heal
         )
         # forceable increment checkpoint server to compute correct address
@@ -158,7 +164,8 @@ class TestManager(TestCase):
             "manager address",
             f"localhost:{self.store.port}",
             20,  # max_step
-            1,  # num_max
+            None,  # max_rank
+            1,  # max_world_size
             True,  # heal
         )
         # forceable increment checkpoint server to compute correct address
@@ -208,7 +215,8 @@ class TestManager(TestCase):
             "manager address",
             f"localhost:{self.store.port}",
             20,  # max_step
-            1,  # num_max
+            None,  # max_rank
+            1,  # max_world_size
             True,  # heal
         )
         # forceable increment checkpoint server to compute correct address
@@ -228,6 +236,7 @@ class TestManager(TestCase):
         torch.testing.assert_close(grad, torch.zeros_like(grad))
         # don't commit since num_max < min_replica_size
         self.assertTrue(manager.should_commit())
+        self.assertEqual(manager.num_participants(), 1)
         self.assertTrue(manager._should_step)
 
         self.assertEqual(manager._quorum_id, 123)
@@ -255,7 +264,8 @@ class TestManager(TestCase):
             "manager address",
             f"localhost:{self.store.port}",
             1,  # max_step
-            2,  # num_max
+            1,  # max_rank
+            2,  # max_world_size
             False,  # heal
         )
 
@@ -292,7 +302,8 @@ class TestManager(TestCase):
             "manager address",
             f"localhost:{self.store.port}",
             2,  # max_step
-            2,  # num_max
+            1,  # max_rank
+            2,  # max_world_size
             False,  # heal
         )
         manager.step()
@@ -313,17 +324,55 @@ class TestManager(TestCase):
         client_mock().quorum.return_value = (
             123,  # quorum_id
             1,  # replica_rank
-            2,  # replica_world
+            2,  # replica_world_size
             "manager address",
             f"localhost:{self.store.port}",
             3,  # max_step
-            2,  # num_max
+            1,  # max_rank
+            2,  # max_world_size
             False,  # heal
         )
 
         manager.step()
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         self.assertTrue(manager.should_commit())
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_quorum_fixed_world_size(self, client_mock) -> None:
+        # test active and spares
+        for rank in [1, 2]:
+            manager = self._create_manager(
+                min_replica_size=2,
+                world_size_mode=WorldSizeMode.FIXED_WITH_SPARES,
+            )
+            client_mock().should_commit = (
+                lambda rank, step, should_commit: should_commit
+            )
+
+            client_mock().quorum.return_value = (
+                123,  # quorum_id
+                rank,  # replica_rank
+                3,  # replica_world
+                "manager address",
+                f"localhost:{self.store.port}",
+                1,  # max_step
+                rank,  # max_rank
+                3,  # max_world_size
+                False,  # heal
+            )
+
+            self.assertEqual(manager._quorum_id, -1)
+            self.assertEqual(manager._step, 0)
+            self.assertEqual(manager.batches_committed(), 0)
+
+            manager.step()
+            manager.allreduce_grad(torch.tensor([1.0])).wait()
+
+            self.assertEqual(manager.is_participating(), rank != 2)
+            self.assertEqual(manager.num_participants(), 2)
+
+            manager.step()
+            self.assertEqual(manager.batches_committed(), 2)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_manager_report_error(self, client_mock) -> None:
@@ -353,12 +402,22 @@ class TestManager(TestCase):
         manager = self._create_manager()
 
         manager._quorum_future = MagicMock()
-        manager._participating_replicas = 5
+        manager._participating_rank = 1
+        manager._participating_world_size = 5
         self.assertEqual(manager.num_participants(), 5)
         # pyre-ignore[16]: _pg is mocked
         manager._pg.allreduce.return_value = _DummyWork(None)
 
+        self.assertTrue(manager.is_participating())
         fut = torch.futures.Future()  # pyre-fixme[29]: not a function
         fut = manager.allreduce_grad(torch.tensor([1.0]))
         result = fut.value()
         torch.testing.assert_close(result, torch.tensor([1.0 / 5]))
+
+        # check healing numerics
+        manager._healing = True
+        self.assertFalse(manager.is_participating())
+        fut = torch.futures.Future()  # pyre-fixme[29]: not a function
+        fut = manager.allreduce_grad(torch.tensor([1.0]))
+        result = fut.value()
+        torch.testing.assert_close(result, torch.tensor([0.0]))

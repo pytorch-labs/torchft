@@ -28,10 +28,10 @@ and Hybrid FSDP.
 import logging
 import os
 import socket
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from enum import Enum
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, cast
 
 import torch
@@ -54,6 +54,24 @@ MANAGER_DEFAULT_PORT: int = int(os.environ.get("TORCHFT_MANAGER_PORT", 29511))
 T = TypeVar("T")
 
 
+class WorldSizeMode(Enum):
+    """
+    This controls the numerics for the job when doing allreduces across replicas
+    when the world size is larger than ``min_replica_size``. The world size will
+    never be smaller than ``min_replica_size``.
+
+    DYNAMIC:
+        The world size will dynamical increase to use all available
+        replicas and normalize the gradient by the world size.
+    FIXED_WITH_SPARES:
+        The number of active replicas is ``min_replica_size`` and any spares
+        will contribute zero gradients.
+    """
+
+    DYNAMIC = 0
+    FIXED_WITH_SPARES = 1
+
+
 class Manager:
     """
     Manager manages the full fault tolerant training loop.
@@ -73,6 +91,7 @@ class Manager:
         timeout: timedelta = timedelta(seconds=60),
         rank: Optional[int] = None,
         world_size: Optional[int] = None,
+        world_size_mode: WorldSizeMode = WorldSizeMode.DYNAMIC,
         store_addr: Optional[str] = None,
         store_port: Optional[int] = None,
         lighthouse_addr: Optional[str] = None,
@@ -98,6 +117,7 @@ class Manager:
         self._pending_state_dict: Optional[Dict[str, object]] = None
         self._use_async_quorum = use_async_quorum
         self._timeout = timeout
+        self._world_size_mode = world_size_mode
 
         store_addr = store_addr or os.environ["MASTER_ADDR"]
         store_port = store_port or int(os.environ["MASTER_PORT"])
@@ -150,12 +170,13 @@ class Manager:
         self._quorum_id = -1
         self._errored = False
         self._healing = False
-        self._participating_replicas = 0
         self._pending_work: List[torch.futures.Future[object]] = []
         self._batches_committed = 0
 
         # first step is 1
         self._should_step = True
+        self._participating_rank: Optional[int] = None
+        self._participating_world_size: int = 0
 
     def shutdown(self) -> None:
         """
@@ -287,7 +308,7 @@ class Manager:
 
         if self._should_step:
             self._step += 1
-            self._batches_committed += self._participating_replicas
+            self._batches_committed += self.num_participants()
 
         self._errored = False
         self._healing = False
@@ -311,25 +332,45 @@ class Manager:
         (
             quorum_id,
             replica_rank,
-            replica_world,
+            replica_world_size,
             address,
             store_address,
             max_step,
-            num_max,
+            max_rank,
+            max_world_size,
             heal,
         ) = self._client.quorum(
             rank=self._rank,
             step=self._step,
             checkpoint_server_addr=self._ckpt_server.address(),
         )
-        self._participating_replicas = (
-            num_max if self._use_async_quorum else replica_world
+
+        # When using async quorum we need to take the recovered workers.
+        # When not using async quorum we need to take the max world size as all
+        # workers will be healthy.
+        self._participating_rank, self._participating_world_size = (
+            (max_rank, max_world_size)
+            if self._use_async_quorum
+            else (replica_rank, replica_world_size)
         )
+
+        # For fixed with spares we need to ensure that we don't have more
+        # participating replicas than the min replica size.
+        if self._world_size_mode == WorldSizeMode.FIXED_WITH_SPARES:
+            self._participating_world_size = min(
+                self._participating_world_size, self._min_replica_size
+            )
+            if (
+                self._participating_rank is not None
+                and self._participating_rank >= self._min_replica_size
+            ):
+                self._participating_rank = None
 
         if quorum_id != self._quorum_id:
             logger.info(f"reconfiguring for quorum_id {quorum_id}")
             store_prefixed_addr = f"{store_address}/torchft/{quorum_id}/{self._rank}"
-            self._pg.configure(store_prefixed_addr, replica_rank, replica_world)
+            # We use the replica rank and world as we want all replicas in the PG.
+            self._pg.configure(store_prefixed_addr, replica_rank, replica_world_size)
             self._quorum_id = quorum_id
 
         # See manager.rs for healing conditions
@@ -396,7 +437,7 @@ class Manager:
         if self._healing:
             self._apply_pending_state_dict()
 
-        enough_replicas = self._participating_replicas >= self._min_replica_size
+        enough_replicas = self.num_participants() >= self._min_replica_size
         local_should_commit = enough_replicas and not self._errored
         should_commit = self._client.should_commit(
             self._rank, self._step, local_should_commit
@@ -469,7 +510,8 @@ class Manager:
         Returns:
             the number of participants in the current quorum
         """
-        return self._participating_replicas
+        assert self._participating_world_size >= 0, "internal error"
+        return self._participating_world_size
 
     def is_participating(self) -> bool:
         """
@@ -478,6 +520,8 @@ class Manager:
         Returns:
             whether this replica is participating in the current quorum
         """
+        if self._participating_rank is None:
+            return False
         if self._healing:
             assert self._use_async_quorum
             return False
