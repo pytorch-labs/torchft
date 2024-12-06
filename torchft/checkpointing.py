@@ -16,20 +16,19 @@ import logging
 import socket
 import threading
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable
+from http.server import BaseHTTPRequestHandler
+from typing import Callable, Generic, TypeVar
 
 import torch
 
+from torchft.http import _IPv6HTTPServer
+
 logger: logging.Logger = logging.getLogger(__name__)
 
-
-class _IPv6HTTPServer(ThreadingHTTPServer):
-    address_family = socket.AF_INET6
-    request_queue_size = 1024
+T = TypeVar("T")
 
 
-class CheckpointServer:
+class CheckpointServer(Generic[T]):
     """
     This is an HTTP server that can be used to transfer checkpoints
     between workers.
@@ -41,7 +40,7 @@ class CheckpointServer:
         state_dict: a callable that returns the state dict to be transferred
     """
 
-    def __init__(self, state_dict: Callable[[], object]) -> None:
+    def __init__(self, state_dict: Callable[[], T]) -> None:
         self._checkpoint_lock = threading.Lock()
         self._disallowed = False
         self._step = -1
@@ -88,7 +87,7 @@ class CheckpointServer:
         self._thread.start()
 
     @classmethod
-    def load_from_address(cls, address: str) -> object:
+    def load_from_address(cls, address: str) -> T:
         """
         Loads a checkpoint from the given address.
 

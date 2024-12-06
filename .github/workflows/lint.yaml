@@ -8,7 +8,7 @@ on:
 
 jobs:
   lint:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - name: Setup Python
         uses: actions/setup-python@v3
@@ -31,7 +31,12 @@ jobs:
         run: |
           set -eux
 
-          lintrunner --force-color --all-files
+          lintrunner --skip PYRE --force-color --all-files
+      - name: Run pyre
+        run: |
+          set -eux
+
+          pyre check
       - name: Run Rust Lint
         run: |
           set -eux

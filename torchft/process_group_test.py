@@ -6,6 +6,7 @@
 
 import os
 from concurrent.futures import ThreadPoolExecutor
+from typing import Tuple
 from unittest import TestCase, skipUnless
 from unittest.mock import Mock
 
@@ -13,14 +14,13 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch._C._distributed_c10d import _resolve_process_group
-from torch.distributed import ReduceOp, TCPStore, _functional_collectives
+from torch.distributed import ReduceOp, TCPStore, Work, _functional_collectives
 from torch.distributed.device_mesh import init_device_mesh
 
 from torchft.manager import Manager
 from torchft.process_group import (
     ErrorSwallowingProcessGroupWrapper,
     ManagedProcessGroup,
-    ProcessGroup,
     ProcessGroupBabyGloo,
     ProcessGroupBabyNCCL,
     ProcessGroupDummy,
@@ -136,7 +136,7 @@ class ProcessGroupTest(TestCase):
 
         store_addr = f"localhost:{store.port}/prefix"
 
-        def run(rank: int) -> None:
+        def run(rank: int) -> Tuple[torch.Tensor, Work]:
             a = ProcessGroupBabyNCCL()
             a.configure(store_addr, rank, 2)
 
@@ -205,7 +205,7 @@ class ProcessGroupTest(TestCase):
     def test_process_group_wrapper(self) -> None:
         pg = ProcessGroupDummy(0, 1)
         wrapper = ProcessGroupWrapper(pg)
-        self.assertIs(wrapper.parent(), pg)
+        self.assertIs(wrapper.parent, pg)
 
         wrapper.configure("addr", 0, 1)
         self.assertEqual(pg.configure_count, 1)
@@ -215,7 +215,7 @@ class ProcessGroupTest(TestCase):
     def test_error_swallowing_process_group_wrapper(self) -> None:
         pg = ProcessGroupDummy(0, 1)
         wrapper = ErrorSwallowingProcessGroupWrapper(pg)
-        self.assertIs(wrapper.parent(), pg)
+        self.assertIs(wrapper.parent, pg)
 
         t = torch.zeros(10)
         work = wrapper.allreduce([t], ReduceOp.SUM)

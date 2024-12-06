@@ -1,0 +1,8 @@
+{
+  "root_files": [
+    "torchft",
+    "*.py",
+    ".pyre_configuration",
+    ".watchmanconfig"
+  ]
+}

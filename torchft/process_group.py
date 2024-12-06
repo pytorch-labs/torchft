@@ -29,6 +29,9 @@ from torch._C._distributed_c10d import (
     _register_process_group,
     _unregister_process_group,
 )
+
+# pyre-fixme[21]: no attribute ProcessGroupNCCL
+# pyre-fixme[21]: no attribute ProcessGroupGloo
 from torch.distributed import (
     BroadcastOptions,
     DeviceMesh,
@@ -102,9 +105,11 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
+    # pyre-fixme[14]: inconsistent override
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
         raise NotImplementedError("not implemented")
 
+    # pyre-fixme[14]: inconsistent override
     def allgather(
         self,
         output_tensors: List[List[torch.Tensor]],
@@ -113,6 +118,7 @@ class ProcessGroup(BaseProcessGroup):
     ) -> Work:
         raise NotImplementedError("not implemented")
 
+    # pyre-fixme[14]: inconsistent override
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
         raise NotImplementedError("not implemented")
 
@@ -127,7 +133,7 @@ class ProcessGroup(BaseProcessGroup):
     def getBackendName(self) -> str:
         raise NotImplementedError("not implemented")
 
-    def register(self, name: str) -> BaseProcessGroup:
+    def register(self, name: str) -> "ProcessGroup":
         """
         Registers the process group with the global registry. This enables usage
         with things like functional_collectives which are compilable.
@@ -184,32 +190,34 @@ class ProcessGroup(BaseProcessGroup):
 
 
 class ProcessGroupWrapper(ProcessGroup):
-    PG_CLASS: Type[BaseProcessGroup]
+    PG_CLASS: Type[BaseProcessGroup]  # pyre-fixme[13]: never initialized
     """
     This is a wrapper around any ProcessGroup with a reconfiguration method.
     """
 
     def __init__(self, pg: Optional[ProcessGroup] = None) -> None:
         super().__init__(0, 1)
-        self._pg = pg
+        self._pg: Optional[BaseProcessGroup] = pg
 
     def configure(self, store_addr: str, rank: int, world_size: int) -> None:
-        if isinstance(self._pg, ProcessGroup):
-            self._pg.configure(store_addr, rank, world_size)
+        pg = self._pg
+        if isinstance(pg, ProcessGroup):
+            pg.configure(store_addr, rank, world_size)
             return
 
-        if self._pg is not None:
-            if hasattr(self._pg, "abort"):
-                self._pg.abort()
+        if pg is not None:
+            if hasattr(pg, "abort"):
+                pg.abort()  # pyre-fixme[16]: no attribute abort
             self._pg = None
 
         store = create_store_client(store_addr)
 
         # TODO: set global timeout
+        # pyre-fixme[20]: expects argument options
         self._pg = self.PG_CLASS(store, rank, world_size)
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
-        return self._pg.allreduce(tensors, opts)
+        return self.parent.allreduce(tensors, opts)
 
     def allgather(
         self,
@@ -217,15 +225,17 @@ class ProcessGroupWrapper(ProcessGroup):
         input_tensor: List[torch.Tensor],
         opts: object,
     ) -> Work:
-        return self._pg.allgather(output_tensors, input_tensor, opts)
+        return self.parent.allgather(output_tensors, input_tensor, opts)
 
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
-        return self._pg.broadcast(tensor_list, opts)
+        return self.parent.broadcast(tensor_list, opts)
 
     def size(self) -> int:
-        return self._pg.size()
+        return self.parent.size()
 
-    def parent(self) -> ProcessGroup:
+    @property
+    def parent(self) -> BaseProcessGroup:
+        assert self._pg is not None, "process group not initialized"
         return self._pg
 
     def __repr__(self) -> str:
@@ -237,7 +247,7 @@ class ProcessGroupGloo(ProcessGroupWrapper):
     This is a reconfigurable version of ProcessGroupGloo.
     """
 
-    PG_CLASS = BaseProcessGroupGloo
+    PG_CLASS = BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
 
     def getBackendName(self) -> str:
         return "torchft-gloo"
@@ -254,7 +264,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
     abort when reconfiguring, we need to ensure this is safe.
     """
 
-    PG_CLASS = BaseProcessGroupNCCL
+    PG_CLASS = BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
 
     def getBackendName(self) -> str:
         return "torchft-nccl"
@@ -326,7 +336,7 @@ class ProcessGroupDummy(ProcessGroup):
 class _ErrorSwallowingWork(Work):
     def __init__(
         self,
-        pg: "ErrorSwallowingProcessGroup",
+        pg: "ErrorSwallowingProcessGroupWrapper",
         work: Work,
         default_result: object,
     ):
@@ -350,7 +360,7 @@ class _ErrorSwallowingWork(Work):
         # schedule error handling as a continuation on the Future
         def callback(
             fut: torch.futures.Future[List[torch.Tensor]],
-        ) -> torch.futures.Future[torch.Tensor]:
+        ) -> object:
             try:
                 return fut.value()
             except Exception as e:
@@ -464,7 +474,7 @@ class _BabyWork(Work):
         self._op_id = op_id
         self._timeout = timeout
 
-    def wait(self) -> bool:
+    def wait(self, timeout: Optional[timedelta] = None) -> bool:
         self._tx.put(("wait", self._op_id), timeout=self._timeout)
         assert _get(self._rx, self._timeout) == self._op_id
         return True
@@ -474,8 +484,9 @@ class _BabyWork(Work):
 
 
 class _BabyWorkNCCL(_BabyWork):
-    def wait(self) -> bool:
+    def wait(self, timeout: Optional[timedelta] = None) -> bool:
         self._tx.put(("synchronize", self._op_id), timeout=self._timeout)
+        # pyre-fixme[23]: unable to unpack into 2 values
         op_id, event = _get(self._rx, self._timeout)
         assert op_id == self._op_id
         assert isinstance(event, torch.cuda.Event)
@@ -495,7 +506,7 @@ class ProcessGroupBaby(ProcessGroup):
 
     """
 
-    PG_CLASS: Type[BaseProcessGroup]
+    PG_CLASS: Type[BaseProcessGroup]  # pyre-fixme[13]: never initialized
     WORK_CLASS: Type[_BabyWork] = _BabyWork
 
     def __init__(self, timeout: float = 60.0) -> None:
@@ -508,6 +519,8 @@ class ProcessGroupBaby(ProcessGroup):
         self._rx = None
         self._future_queue = None
         self._future_thread = None
+        self._futures = {}
+        self._futures_lock = threading.Lock()
 
         self._timeout = timeout
 
@@ -561,6 +574,7 @@ class ProcessGroupBaby(ProcessGroup):
         try:
             store = create_store_client(store_addr)
 
+            # pyre-fixme[20]: expects argument options
             pg = cls.PG_CLASS(store, rank, world_size)
 
             work = {}
@@ -635,7 +649,7 @@ class ProcessGroupBaby(ProcessGroup):
 
     def _get_future(self, op_id: int) -> Future:
         with self._futures_lock:
-            fut = Future()
+            fut = Future()  # pyre-fixme[29]: is not a function
             self._futures[op_id] = fut
             self._tx.put(("future", op_id), timeout=self._timeout)
 
@@ -672,7 +686,7 @@ class ProcessGroupBabyGloo(ProcessGroupBaby):
     ProcessGroupBabyNCCL.
     """
 
-    PG_CLASS = BaseProcessGroupGloo
+    PG_CLASS = BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
 
     def getBackendName(self):
         return "torchft-baby-gloo"
@@ -694,7 +708,7 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
     tensors may leak in the current PyTorch implementation. TODO fix
     """
 
-    PG_CLASS = BaseProcessGroupNCCL
+    PG_CLASS = BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
     WORK_CLASS = _BabyWorkNCCL
 
     def getBackendName(self):
@@ -719,12 +733,12 @@ def extend_device_mesh(
     """
     groups = mesh.get_all_groups()
     groups.insert(dim, pg)
-    mesh_dim_names = list(mesh.mesh_dim_names)
+    mesh_dim_names = list(mesh.mesh_dim_names or [])
     mesh_dim_names.insert(dim, name)
 
     return DeviceMesh.from_group(
         group=groups,
         device_type=mesh.device_type,
         mesh=mesh.mesh.unsqueeze(dim),
-        mesh_dim_names=mesh_dim_names,
+        mesh_dim_names=tuple(mesh_dim_names),
     )

@@ -42,3 +42,26 @@ command = [
     '--',
     '@{{PATHSFILE}}',
 ]
+
+[[linter]]
+code = 'PYRE'
+include_patterns = [
+    '**/*.py',
+    '**/*.pyi',
+]
+command = [
+    'python3',
+    'tools/linter/adapters/pyre_linter.py',
+    '--',
+    '@{{PATHSFILE}}'
+]
+init_command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'pip_init',
+    '--dry-run={{DRYRUN}}',
+    'pyre-check==0.9.23',
+]
+is_formatter = false

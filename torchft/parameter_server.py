@@ -18,10 +18,11 @@ import threading
 import urllib.request
 import uuid
 from abc import ABC, abstractmethod
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 from torch.distributed import TCPStore
 
+from torchft.http import _IPv6HTTPServer
 from torchft.process_group import ProcessGroup
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ class ParameterServer(ABC):
                     raise
 
         server_address = ("", port)
-        self._server = ThreadingHTTPServer(server_address, RequestHandler)
+        self._server = _IPv6HTTPServer(server_address, RequestHandler)
         self._server.daemon_threads = True
         logger.info(f"Started ParameterServer on {self.address()}...")
 

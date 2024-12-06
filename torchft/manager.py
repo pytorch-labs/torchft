@@ -32,7 +32,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, cast
 
 import torch
 from torch.distributed import PrefixStore, ReduceOp, TCPStore, Work
@@ -50,6 +50,8 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 MANAGER_ADDR_KEY: str = "manager_addr"
 MANAGER_DEFAULT_PORT: int = int(os.environ.get("TORCHFT_MANAGER_PORT", 29511))
+
+T = TypeVar("T")
 
 
 class Manager:
@@ -93,14 +95,15 @@ class Manager:
         """
         self._load_state_dict = load_state_dict
         self._state_dict = state_dict
+        self._pending_state_dict: Optional[Dict[str, object]] = None
         self._use_async_quorum = use_async_quorum
         self._timeout = timeout
 
         store_addr = store_addr or os.environ["MASTER_ADDR"]
         store_port = store_port or int(os.environ["MASTER_PORT"])
-        rank = rank or int(os.environ["RANK"])
+        self._rank: int = rank or int(os.environ["RANK"])
+        rank = self._rank
         world_size = world_size or int(os.environ["WORLD_SIZE"])
-        self._rank = rank
         self._min_replica_size = min_replica_size
 
         self._ckpt_server = CheckpointServer(
@@ -141,7 +144,6 @@ class Manager:
             self._store.set(MANAGER_ADDR_KEY, addr)
 
         addr = self._store.get(MANAGER_ADDR_KEY).decode("utf-8")
-        # pyre-fixme[16]: can't find rust module
         self._client = ManagerClient(addr, timeout=timeout)
 
         self._step = 0
@@ -149,7 +151,7 @@ class Manager:
         self._errored = False
         self._healing = False
         self._participating_replicas = 0
-        self._pending_work: List[torch.futures.Future[torch.Tensor]] = []
+        self._pending_work: List[torch.futures.Future[object]] = []
         self._batches_committed = 0
 
         # first step is 1
@@ -180,7 +182,7 @@ class Manager:
             a Future that will be completed with the allreduced gradient
         """
         if self.errored():
-            fut = torch.futures.Future()
+            fut = torch.futures.Future()  # pyre-fixme[29]: not a function
             fut.set_result(grad)
             return fut
 
@@ -200,7 +202,7 @@ class Manager:
             # on the Future
             def callback(
                 fut: torch.futures.Future[List[torch.Tensor]],
-            ) -> torch.futures.Future[torch.Tensor]:
+            ) -> torch.Tensor:
                 nonlocal grad
 
                 fut.value()
@@ -217,7 +219,7 @@ class Manager:
             logger.exception(f"got exception in all reduce -- skipping remaining: {e}")
             self.report_error()
 
-            fut = torch.futures.Future()
+            fut = torch.futures.Future()  # pyre-fixme[29]: not a function
             fut.set_result(grad)
             return fut
 
@@ -242,7 +244,9 @@ class Manager:
         """
         return self._errored
 
-    def wrap_future(self, fut: torch.futures.Future[object], default: object) -> None:
+    def wrap_future(
+        self, fut: torch.futures.Future[T], default: T
+    ) -> torch.futures.Future[T]:
         """
         Wrap a Future and swallow any errors that occur and report them to the manager.
 
@@ -255,8 +259,8 @@ class Manager:
 
         # schedule error handling as a continuation on the Future
         def callback(
-            fut: torch.futures.Future[List[torch.Tensor]],
-        ) -> torch.futures.Future[torch.Tensor]:
+            fut: torch.futures.Future[T],
+        ) -> T:
             nonlocal default
 
             try:
@@ -267,7 +271,7 @@ class Manager:
                 return default
 
         fut = fut.then(callback)
-        self._pending_work.append(fut)
+        self._pending_work.append(cast(torch.futures.Future[object], fut))
         return fut
 
     def step(self) -> None:
@@ -334,14 +338,13 @@ class Manager:
             logger.info("healing required")
 
             logger.info(f"fetching checkpoint server address from {address}")
-            # pyre-fixme[16]: can't find rust module
             primary_client = ManagerClient(address, timeout=self._timeout)
             checkpoint_server_address = primary_client.checkpoint_address(self._rank)
 
-            self._state_dict = CheckpointServer.load_from_address(
+            self._pending_state_dict = CheckpointServer.load_from_address(
                 checkpoint_server_address
             )
-            self.load_state_dict(self._state_dict["torchft"])
+            self.load_state_dict(self._pending_state_dict["torchft"])
             # we apply the user state dict only when safe from the main thread
 
             # This isn't strictly needed as loading the state_dict above should
@@ -354,10 +357,10 @@ class Manager:
         # synchronize on future
         self._quorum_future.result()
 
-        assert self._state_dict is not None, "checkpoint was not staged"
+        assert self._pending_state_dict is not None, "checkpoint was not staged"
 
-        self._load_state_dict(self._state_dict["user"])
-        self._state_dict = None
+        self._load_state_dict(self._pending_state_dict["user"])
+        self._pending_state_dict = None
 
     def should_commit(self) -> bool:
         """

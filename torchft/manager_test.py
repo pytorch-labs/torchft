@@ -16,6 +16,9 @@ from torchft.torchft import ManagerClient
 
 
 class TestManager(TestCase):
+    store: TCPStore  # pyre-fixme[13]: never initialized
+    load_state_dict: MagicMock  # pyre-fixme[13]: never initialized
+
     def _create_manager(
         self, use_async_quorum: bool = True, min_replica_size: int = 2
     ) -> Manager:
@@ -98,6 +101,7 @@ class TestManager(TestCase):
 
         self.assertEqual(manager._quorum_id, 123)
         self.assertEqual(manager._step, 1)
+        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
 
         manager.step()
@@ -135,7 +139,9 @@ class TestManager(TestCase):
 
         self.assertEqual(manager._quorum_id, 123)
         self.assertEqual(manager._step, 20)
+        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
+        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 1)
 
         self.assertEqual(self.load_state_dict.call_count, 1)
@@ -178,7 +184,9 @@ class TestManager(TestCase):
 
         self.assertEqual(manager._quorum_id, 123)
         self.assertEqual(manager._step, 20)
+        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
+        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 1)
 
         self.assertEqual(self.load_state_dict.call_count, 1)
@@ -224,7 +232,9 @@ class TestManager(TestCase):
 
         self.assertEqual(manager._quorum_id, 123)
         self.assertEqual(manager._step, 20)
+        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
+        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 1)
 
         self.assertEqual(self.load_state_dict.call_count, 1)
@@ -254,15 +264,18 @@ class TestManager(TestCase):
 
         manager.step()
         manager.allreduce_grad(torch.tensor([1.0])).wait()
+        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
 
         # inject failure when work queued
+        # pyre-ignore[16]: _pg is mocked
         manager._pg.allreduce.side_effect = RuntimeError("injected failure")
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         self.assertTrue(manager._errored)
         # this should be skipped due to error
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         self.assertEqual(manager._pg.allreduce.call_count, 2)
+        # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 1)
 
         self.assertFalse(manager.should_commit())
@@ -284,7 +297,7 @@ class TestManager(TestCase):
         )
         manager.step()
 
-        bad_fut = torch.futures.Future()
+        bad_fut = torch.futures.Future()  # pyre-fixme[29]: not a function
         bad_fut.set_exception(RuntimeError("injected failure"))
         manager._pg.allreduce.return_value.get_future.return_value = bad_fut
         manager.allreduce_grad(torch.tensor([1.0])).wait()
@@ -326,7 +339,7 @@ class TestManager(TestCase):
 
         self.assertFalse(manager.errored())
 
-        fut = torch.futures.Future()
+        fut = torch.futures.Future()  # pyre-fixme[29]: not a function
         wrapped_fut = manager.wrap_future(fut, 2)
 
         fut.set_exception(RuntimeError("injected failure"))
@@ -342,9 +355,10 @@ class TestManager(TestCase):
         manager._quorum_future = MagicMock()
         manager._participating_replicas = 5
         self.assertEqual(manager.num_participants(), 5)
+        # pyre-ignore[16]: _pg is mocked
         manager._pg.allreduce.return_value = _DummyWork(None)
 
-        fut = torch.futures.Future()
+        fut = torch.futures.Future()  # pyre-fixme[29]: not a function
         fut = manager.allreduce_grad(torch.tensor([1.0]))
         result = fut.value()
         torch.testing.assert_close(result, torch.tensor([1.0 / 5]))

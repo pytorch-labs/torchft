@@ -44,7 +44,7 @@ class TestDDP(TestCase):
 
             call_count += 1
 
-            fut = Future()
+            fut = Future()  # pyre-fixme[29]: not a function
             fut.set_result(tensor)
             return fut
 

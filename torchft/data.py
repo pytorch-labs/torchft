@@ -47,7 +47,6 @@ class DistributedSampler(data.distributed.DistributedSampler):
         dataset: data.Dataset,
         replica_group: int,
         num_replica_groups: int,
-        *args,
         rank: Optional[int] = None,
         num_replicas: Optional[int] = None,
         **kwargs,
@@ -69,5 +68,8 @@ class DistributedSampler(data.distributed.DistributedSampler):
         self.global_world_size = num_replicas * num_replica_groups
 
         super().__init__(
-            dataset, *args, rank=self.global_rank, num_replicas=self.global_world_size
+            dataset,
+            rank=self.global_rank,
+            num_replicas=self.global_world_size,
+            **kwargs,
         )
