@@ -27,6 +27,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tonic::service::Routes;
+use tonic::transport::server::TcpIncoming;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
@@ -56,6 +57,8 @@ struct State {
 pub struct Lighthouse {
     state: Mutex<State>,
     opt: LighthouseOpt,
+    listener: Mutex<Option<tokio::net::TcpListener>>,
+    local_addr: SocketAddr,
 }
 
 #[derive(StructOpt, Debug)]
@@ -63,16 +66,16 @@ pub struct Lighthouse {
 pub struct LighthouseOpt {
     // bind is the address to bind the server to.
     #[structopt(long = "bind", default_value = "[::]:29510")]
-    bind: String,
+    pub bind: String,
 
     #[structopt(long = "join_timeout_ms", default_value = "60000")]
-    join_timeout_ms: u64,
+    pub join_timeout_ms: u64,
 
     #[structopt(long = "min_replicas")]
-    min_replicas: u64,
+    pub min_replicas: u64,
 
     #[structopt(long = "quorum_tick_ms", default_value = "100")]
-    quorum_tick_ms: u64,
+    pub quorum_tick_ms: u64,
 }
 
 fn quorum_changed(a: &Vec<QuorumMember>, b: &Vec<QuorumMember>) -> bool {
@@ -83,9 +86,10 @@ fn quorum_changed(a: &Vec<QuorumMember>, b: &Vec<QuorumMember>) -> bool {
 }
 
 impl Lighthouse {
-    pub fn new(opt: LighthouseOpt) -> Arc<Self> {
+    pub async fn new(opt: LighthouseOpt) -> Result<Arc<Self>> {
         let (tx, _) = broadcast::channel(16);
-        Arc::new(Self {
+        let listener = tokio::net::TcpListener::bind(&opt.bind).await?;
+        Ok(Arc::new(Self {
             state: Mutex::new(State {
                 participants: HashMap::new(),
                 channel: tx,
@@ -94,7 +98,9 @@ impl Lighthouse {
                 heartbeats: HashMap::new(),
             }),
             opt: opt,
-        })
+            local_addr: listener.local_addr()?,
+            listener: Mutex::new(Some(listener)),
+        }))
     }
 
     // Checks whether the quorum is valid and an explanation for the state.
@@ -209,13 +215,20 @@ impl Lighthouse {
         }
     }
 
-    async fn _run_grpc(self: Arc<Self>) -> Result<()> {
-        let bind: SocketAddr = self.opt.bind.parse()?;
-        info!(
-            "Lighthouse listening on: http://{}:{}",
+    pub fn address(&self) -> String {
+        format!(
+            "http://{}:{}",
             gethostname().into_string().unwrap(),
-            bind.port()
-        );
+            self.local_addr.port()
+        )
+    }
+
+    async fn _run_grpc(self: Arc<Self>) -> Result<()> {
+        info!("Lighthouse listening on: {}", self.address());
+
+        let listener = self.listener.lock().await.take().unwrap();
+        let incoming =
+            TcpIncoming::from_listener(listener, true, None).map_err(|e| anyhow::anyhow!(e))?;
 
         // Setup HTTP endpoints
         let app = Router::new()
@@ -245,7 +258,7 @@ impl Lighthouse {
             // allow non-GRPC connections
             .accept_http1(true)
             .add_routes(routes)
-            .serve(bind)
+            .serve_with_incoming(incoming)
             .await
             .map_err(|e| e.into())
     }
@@ -429,14 +442,14 @@ mod tests {
 
     use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 
-    fn lighthouse_test_new() -> Arc<Lighthouse> {
+    async fn lighthouse_test_new() -> Result<Arc<Lighthouse>> {
         let opt = LighthouseOpt {
             min_replicas: 1,
-            bind: "0.0.0.0:29510".to_string(),
+            bind: "[::]:0".to_string(),
             join_timeout_ms: 60 * 60 * 1000, // 1hr
             quorum_tick_ms: 10,
         };
-        Lighthouse::new(opt)
+        Lighthouse::new(opt).await
     }
 
     async fn lighthouse_client_new(addr: String) -> Result<LighthouseServiceClient<Channel>> {
@@ -448,8 +461,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_quorum_join_timeout() {
-        let lighthouse = lighthouse_test_new();
+    async fn test_quorum_join_timeout() -> Result<()> {
+        let lighthouse = lighthouse_test_new().await?;
         assert!(!lighthouse.quorum_valid().await.0);
 
         {
@@ -478,11 +491,13 @@ mod tests {
         }
 
         assert!(lighthouse.quorum_valid().await.0);
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_quorum_fast_prev_quorum() {
-        let lighthouse = lighthouse_test_new();
+    async fn test_quorum_fast_prev_quorum() -> Result<()> {
+        let lighthouse = lighthouse_test_new().await?;
         assert!(!lighthouse.quorum_valid().await.0);
 
         {
@@ -520,23 +535,23 @@ mod tests {
         }
 
         assert!(lighthouse.quorum_valid().await.0);
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_lighthouse_e2e() {
+    async fn test_lighthouse_e2e() -> Result<()> {
         let opt = LighthouseOpt {
             min_replicas: 1,
-            bind: "0.0.0.0:29510".to_string(),
+            bind: "[::]:0".to_string(),
             join_timeout_ms: 1,
             quorum_tick_ms: 10,
         };
-        let lighthouse = Lighthouse::new(opt);
+        let lighthouse = Lighthouse::new(opt).await?;
 
         let lighthouse_task = tokio::spawn(lighthouse.clone().run());
 
-        let mut client = lighthouse_client_new("http://localhost:29510".to_string())
-            .await
-            .unwrap();
+        let mut client = lighthouse_client_new(lighthouse.address()).await.unwrap();
 
         {
             let request = tonic::Request::new(LighthouseHeartbeatRequest {
@@ -563,6 +578,7 @@ mod tests {
         }
 
         lighthouse_task.abort();
+        Ok(())
     }
 
     #[tokio::test]

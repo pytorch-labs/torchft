@@ -9,7 +9,6 @@ pub mod manager;
 
 use core::time::Duration;
 use std::env;
-use std::sync::Arc;
 
 use anyhow::Result;
 use pyo3::exceptions::PyRuntimeError;
@@ -28,8 +27,6 @@ use pyo3::prelude::*;
 
 #[pyclass]
 struct Manager {
-    runtime: Runtime,
-    manager: Arc<manager::Manager>,
     handle: JoinHandle<Result<()>>,
 }
 
@@ -47,20 +44,18 @@ impl Manager {
     ) -> Self {
         py.allow_threads(move || {
             let runtime = Runtime::new().unwrap();
-            let manager = manager::Manager::new(
-                replica_id,
-                lighthouse_addr,
-                address,
-                bind,
-                store_addr,
-                world_size,
-            );
+            let manager = runtime
+                .block_on(manager::Manager::new(
+                    replica_id,
+                    lighthouse_addr,
+                    address,
+                    bind,
+                    store_addr,
+                    world_size,
+                ))
+                .unwrap();
             let handle = runtime.spawn(manager.clone().run());
-            Self {
-                runtime: runtime,
-                manager: manager,
-                handle: handle,
-            }
+            Self { handle: handle }
         })
     }
 
@@ -193,11 +188,16 @@ fn lighthouse_main(py: Python<'_>) {
     let mut args = env::args();
     args.next(); // discard binary arg
     let opt = lighthouse::LighthouseOpt::from_iter(args);
-    let lighthouse = lighthouse::Lighthouse::new(opt);
-
     let rt = Runtime::new().unwrap();
+    rt.block_on(lighthouse_main_async(opt)).unwrap();
+}
 
-    rt.block_on(lighthouse.run()).unwrap();
+async fn lighthouse_main_async(opt: lighthouse::LighthouseOpt) -> Result<()> {
+    let lighthouse = lighthouse::Lighthouse::new(opt).await?;
+
+    lighthouse.run().await?;
+
+    Ok(())
 }
 
 #[pymodule]

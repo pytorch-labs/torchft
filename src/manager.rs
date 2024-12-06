@@ -4,20 +4,22 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use core::net::SocketAddr;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use gethostname::gethostname;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
+use tonic::transport::server::TcpIncoming;
 use tonic::transport::Server;
-use tonic::{Request, Response, Status};
-
 use tonic::transport::{Channel, Endpoint};
+use tonic::{Request, Response, Status};
 
 use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
@@ -49,9 +51,10 @@ pub struct Manager {
     lighthouse_addr: String,
     address: String,
     store_address: String,
-    bind: String,
     world_size: u64,
     state: Mutex<ManagerState>,
+    listener: Mutex<Option<tokio::net::TcpListener>>,
+    local_addr: SocketAddr,
 }
 
 pub async fn manager_client_new(
@@ -70,23 +73,24 @@ pub async fn manager_client_new(
 }
 
 impl Manager {
-    pub fn new(
+    pub async fn new(
         replica_id: String,
         lighthouse_addr: String,
         address: String,
         bind: String,
         store_addr: String,
         world_size: u64,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>> {
         let (tx, _) = broadcast::channel(16);
         let (should_commit_tx, _) = broadcast::channel(16);
 
-        Arc::new(Self {
+        let listener = tokio::net::TcpListener::bind(&bind).await?;
+
+        Ok(Arc::new(Self {
             replica_id: replica_id,
             lighthouse_addr: lighthouse_addr,
             address: address,
             store_address: store_addr,
-            bind: bind,
             world_size: world_size,
             state: Mutex::new(ManagerState {
                 channel: tx,
@@ -97,7 +101,9 @@ impl Manager {
                 should_commit_count: HashSet::new(),
                 should_commit_failures: HashSet::new(),
             }),
-        })
+            local_addr: listener.local_addr()?,
+            listener: Mutex::new(Some(listener)),
+        }))
     }
 
     pub async fn run(self: Arc<Self>) -> Result<()> {
@@ -113,13 +119,28 @@ impl Manager {
         Ok(())
     }
 
+    pub fn address(&self) -> String {
+        format!(
+            "http://{}:{}",
+            gethostname().into_string().unwrap(),
+            self.local_addr.port()
+        )
+    }
+
     async fn _run_grpc(self: Arc<Self>) -> Result<()> {
-        let bind = self.bind.parse()?;
-        info!("Manager {} listening on {}", self.replica_id, bind);
+        info!(
+            "Manager {} listening on {}",
+            self.replica_id,
+            self.address()
+        );
+
+        let listener = self.listener.lock().await.take().unwrap();
+        let incoming =
+            TcpIncoming::from_listener(listener, true, None).map_err(|e| anyhow::anyhow!(e))?;
 
         Server::builder()
             .add_service(ManagerServiceServer::new(self))
-            .serve(bind)
+            .serve_with_incoming(incoming)
             .await
             .map_err(|e| e.into())
     }
@@ -355,6 +376,7 @@ impl ManagerService for Arc<Manager> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lighthouse::{Lighthouse, LighthouseOpt};
 
     async fn should_commit(rank: i64, should_commit: bool) -> Result<ShouldCommitResponse> {
         let mut client = manager_client_new(
@@ -379,10 +401,11 @@ mod tests {
             "rep_id".to_string(),
             "lighthouse".to_string(),
             "addr".to_string(),
-            "0.0.0.0:29531".to_string(),
+            "[::]:29531".to_string(),
             "store_addr".to_string(),
             2,
-        );
+        )
+        .await?;
         let manager_fut = tokio::spawn(manager._run_grpc());
 
         let fut_a = tokio::spawn(should_commit(0, true));
@@ -402,6 +425,53 @@ mod tests {
         assert!(!resp_b.should_commit);
 
         manager_fut.abort();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_quorum() -> Result<()> {
+        let lighthouse = Lighthouse::new(LighthouseOpt {
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 100,
+            min_replicas: 1,
+            quorum_tick_ms: 100,
+        })
+        .await?;
+        let lighthouse_fut = tokio::spawn(lighthouse.clone().run());
+
+        let manager = Manager::new(
+            "rep_id".to_string(),
+            lighthouse.address(),
+            "addr".to_string(),
+            "[::]:0".to_string(),
+            "store_addr".to_string(),
+            1, // world size
+        )
+        .await?;
+        let manager_fut = tokio::spawn(manager.clone().run());
+
+        let mut client = manager_client_new(manager.address(), Duration::from_secs(10)).await?;
+
+        let request = tonic::Request::new(ManagerQuorumRequest {
+            rank: 0,
+            step: 123,
+            checkpoint_server_addr: "addr".to_string(),
+        });
+        let resp = client.quorum(request).await?.into_inner();
+
+        manager_fut.abort();
+        lighthouse_fut.abort();
+
+        assert_eq!(resp.quorum_id, 1);
+        assert_eq!(resp.address, "addr".to_string());
+        assert_eq!(resp.store_address, "store_addr".to_string());
+        assert_eq!(resp.max_step, 123);
+        assert_eq!(resp.max_rank, Some(0));
+        assert_eq!(resp.max_world_size, 1);
+        assert_eq!(resp.replica_rank, 0);
+        assert_eq!(resp.replica_world_size, 1);
+        assert_eq!(resp.heal, false);
 
         Ok(())
     }

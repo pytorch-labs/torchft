@@ -17,7 +17,7 @@ async fn main() {
         .unwrap();
 
     let opt = LighthouseOpt::from_args();
-    let lighthouse = Lighthouse::new(opt);
+    let lighthouse = Lighthouse::new(opt).await.unwrap();
 
     lighthouse.run().await.unwrap();
 }
