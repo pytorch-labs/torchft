@@ -23,12 +23,15 @@ jobs:
 
           sudo apt-get install -y protobuf-compiler
 
+          pip install lintrunner lintrunner-adapters
+          lintrunner init
+
           pip install .[dev] -v
-      - name: Run Python Lint
+      - name: Run lintrunner
         run: |
           set -eux
 
-          black --check .
+          lintrunner --force-color --all-files
       - name: Run Rust Lint
         run: |
           set -eux

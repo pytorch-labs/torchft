@@ -24,7 +24,6 @@ from torch.distributed import TCPStore
 
 from torchft.process_group import ProcessGroup
 
-
 logger: logging.Logger = logging.getLogger(__name__)
 
 

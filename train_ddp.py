@@ -4,24 +4,24 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import sys
 import logging
 import os
+import sys
 
 import torch
-from torch import nn, optim
 import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as transforms
+from torch import nn, optim
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from torchft import (
-    Manager,
-    ProcessGroupGloo,
-    ProcessGroupBabyNCCL,
     DistributedDataParallel,
-    Optimizer,
     DistributedSampler,
+    Manager,
+    Optimizer,
+    ProcessGroupBabyNCCL,
+    ProcessGroupGloo,
 )
 
 logging.basicConfig(level=logging.INFO)

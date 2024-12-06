@@ -14,15 +14,15 @@ Manager to provide fault tolerance.
 
 import os
 import sys
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
 from torch import nn
 from torch.distributed.algorithms.join import Joinable
-
 from torch.nn import parallel
+
 from torchft.process_group import ProcessGroup, ProcessGroupDummy, ProcessGroupGloo
 
 if TYPE_CHECKING:

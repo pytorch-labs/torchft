@@ -27,3 +27,7 @@ features = ["pyo3/extension-module"]
 
 [project.scripts]
 torchft_lighthouse = "torchft.torchft:lighthouse_main"
+
+[tool.isort]
+multi_line_output = 3
+combine_as_imports = true

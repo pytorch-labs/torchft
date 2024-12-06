@@ -12,7 +12,7 @@ This module implements an optimizer wrapper that works with the Manager to provi
 
 """
 
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from torch.optim import Optimizer
 

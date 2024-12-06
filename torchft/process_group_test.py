@@ -6,22 +6,19 @@
 
 import os
 from concurrent.futures import ThreadPoolExecutor
-from unittest import skipUnless, TestCase
+from unittest import TestCase, skipUnless
 from unittest.mock import Mock
 
 import torch
 import torch.distributed as dist
 from torch import nn
 from torch._C._distributed_c10d import _resolve_process_group
-from torch.distributed import _functional_collectives, ReduceOp, TCPStore
+from torch.distributed import ReduceOp, TCPStore, _functional_collectives
 from torch.distributed.device_mesh import init_device_mesh
-from torchft.manager import Manager
 
+from torchft.manager import Manager
 from torchft.process_group import (
-    _DummyWork,
-    _ErrorSwallowingWork,
     ErrorSwallowingProcessGroupWrapper,
-    extend_device_mesh,
     ManagedProcessGroup,
     ProcessGroup,
     ProcessGroupBabyGloo,
@@ -30,6 +27,9 @@ from torchft.process_group import (
     ProcessGroupGloo,
     ProcessGroupNCCL,
     ProcessGroupWrapper,
+    _DummyWork,
+    _ErrorSwallowingWork,
+    extend_device_mesh,
 )
 
 

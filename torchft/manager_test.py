@@ -5,13 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 from unittest import TestCase
-from unittest.mock import create_autospec, MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import torch
 from torch.distributed import TCPStore
-from torchft.manager import Manager, MANAGER_ADDR_KEY
-from torchft.process_group import _DummyWork, ProcessGroup
 
+from torchft.manager import MANAGER_ADDR_KEY, Manager
+from torchft.process_group import ProcessGroup, _DummyWork
 from torchft.torchft import ManagerClient
 
 

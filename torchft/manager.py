@@ -32,11 +32,12 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from typing import Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 import torch
 from torch.distributed import PrefixStore, ReduceOp, TCPStore, Work
 from torch.optim import Optimizer
+
 from torchft.checkpointing import CheckpointServer
 
 # pyre-fixme[21]: can't find rust module

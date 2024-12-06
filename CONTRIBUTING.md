@@ -60,7 +60,9 @@ We actively welcome your pull requests.
 `torchft` enforces a fairly strict code format with tools such as cargo fmt and black.
 
 ```shell
-scripts/lint.sh
+pip install lintrunner lintrunner-adapters
+lintrunner init
+lintrunner -a
 ```
 
 ### Tests

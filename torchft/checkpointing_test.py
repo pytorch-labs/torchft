@@ -4,12 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchft.checkpointing import CheckpointServer
-
 import urllib.error
-
 from unittest import TestCase
 from unittest.mock import MagicMock
+
+from torchft.checkpointing import CheckpointServer
 
 
 class TestCheckpointing(TestCase):

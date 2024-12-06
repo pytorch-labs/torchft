@@ -20,7 +20,7 @@ import logging
 import threading
 from abc import ABC
 from datetime import timedelta
-from typing import Callable, List, Optional, Tuple, Type, TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Type
 
 import torch
 import torch.distributed as dist
@@ -32,16 +32,15 @@ from torch._C._distributed_c10d import (
 from torch.distributed import (
     BroadcastOptions,
     DeviceMesh,
-    get_rank,
     PrefixStore,
     ProcessGroup as BaseProcessGroup,
     ProcessGroupGloo as BaseProcessGroupGloo,
     ProcessGroupNCCL as BaseProcessGroupNCCL,
     Store,
     TCPStore,
+    get_rank,
 )
-from torch.distributed.distributed_c10d import _world, Work
-
+from torch.distributed.distributed_c10d import Work, _world
 from torch.futures import Future
 
 if TYPE_CHECKING:

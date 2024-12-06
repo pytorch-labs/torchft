@@ -8,16 +8,13 @@ from unittest import TestCase
 from unittest.mock import create_autospec
 
 import torch
-from torch import nn
 import torch.distributed as dist
+from torch import nn
 from torch.futures import Future
 
-from torchft.ddp import (
-    PureDistributedDataParallel,
-    DistributedDataParallel,
-)
-from torchft.process_group import ProcessGroupGloo, ProcessGroupBabyGloo
+from torchft.ddp import DistributedDataParallel, PureDistributedDataParallel
 from torchft.manager import Manager
+from torchft.process_group import ProcessGroupBabyGloo, ProcessGroupGloo
 
 
 class TestDDP(TestCase):

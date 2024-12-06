@@ -4,13 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchft.optim import OptimizerWrapper
-from torchft.manager import Manager
+from unittest import TestCase
+from unittest.mock import MagicMock, create_autospec
+
 from torch.nn import Linear
 from torch.optim import AdamW
 
-from unittest import TestCase
-from unittest.mock import MagicMock, create_autospec
+from torchft.manager import Manager
+from torchft.optim import OptimizerWrapper
 
 
 class TestOptim(TestCase):

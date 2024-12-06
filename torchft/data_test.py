@@ -6,8 +6,9 @@
 
 from unittest import TestCase
 
-from torchft.data import DistributedSampler
 from torch.utils.data import Dataset
+
+from torchft.data import DistributedSampler
 
 
 class DummyDataset(Dataset):
