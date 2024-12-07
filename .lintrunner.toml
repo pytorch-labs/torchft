@@ -1,6 +1,7 @@
 [[linter]]
 code = 'BLACK-ISORT'
 include_patterns = [
+    '*.py',
     '**/*.py',
 ]
 exclude_patterns = []
@@ -46,6 +47,7 @@ command = [
 [[linter]]
 code = 'PYRE'
 include_patterns = [
+    '*.py',
     '**/*.py',
     '**/*.pyi',
 ]

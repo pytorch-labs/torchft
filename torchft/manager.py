@@ -39,8 +39,6 @@ from torch.distributed import PrefixStore, ReduceOp, TCPStore, Work
 from torch.optim import Optimizer
 
 from torchft.checkpointing import CheckpointServer
-
-# pyre-fixme[21]: can't find rust module
 from torchft.torchft import Manager as _Manager, ManagerClient
 
 if TYPE_CHECKING:
@@ -121,7 +119,7 @@ class Manager:
 
         store_addr = store_addr or os.environ["MASTER_ADDR"]
         store_port = store_port or int(os.environ["MASTER_PORT"])
-        self._rank: int = rank or int(os.environ["RANK"])
+        self._rank: int = rank if rank is not None else int(os.environ["RANK"])
         rank = self._rank
         world_size = world_size or int(os.environ["WORLD_SIZE"])
         self._min_replica_size = min_replica_size
@@ -151,7 +149,6 @@ class Manager:
 
             if replica_id is None:
                 replica_id = str(uuid.uuid4())
-            # pyre-fixme[16]: can't find rust module
             self._manager = _Manager(
                 replica_id=replica_id,
                 lighthouse_addr=lighthouse_addr,

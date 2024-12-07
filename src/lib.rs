@@ -9,6 +9,7 @@ pub mod manager;
 
 use core::time::Duration;
 use std::env;
+use std::sync::Arc;
 
 use anyhow::Result;
 use pyo3::exceptions::PyRuntimeError;
@@ -28,6 +29,8 @@ use pyo3::prelude::*;
 #[pyclass]
 struct Manager {
     handle: JoinHandle<Result<()>>,
+    manager: Arc<manager::Manager>,
+    _runtime: Runtime,
 }
 
 #[pymethods]
@@ -55,8 +58,16 @@ impl Manager {
                 ))
                 .unwrap();
             let handle = runtime.spawn(manager.clone().run());
-            Self { handle: handle }
+            Self {
+                handle: handle,
+                manager: manager,
+                _runtime: runtime,
+            }
         })
+    }
+
+    fn address(&self) -> PyResult<String> {
+        Ok(self.manager.address().to_string())
     }
 
     fn shutdown(&self, py: Python<'_>) {
@@ -200,6 +211,48 @@ async fn lighthouse_main_async(opt: lighthouse::LighthouseOpt) -> Result<()> {
     Ok(())
 }
 
+#[pyclass]
+struct Lighthouse {
+    lighthouse: Arc<lighthouse::Lighthouse>,
+    handle: JoinHandle<Result<()>>,
+    _runtime: Runtime,
+}
+
+#[pymethods]
+impl Lighthouse {
+    #[new]
+    fn new(py: Python<'_>, bind: String, min_replicas: u64) -> PyResult<Self> {
+        py.allow_threads(move || {
+            let rt = Runtime::new().unwrap();
+
+            let lighthouse = rt
+                .block_on(lighthouse::Lighthouse::new(lighthouse::LighthouseOpt {
+                    bind: bind,
+                    min_replicas: min_replicas,
+                    join_timeout_ms: 100,
+                    quorum_tick_ms: 100,
+                }))
+                .unwrap();
+
+            Ok(Self {
+                handle: rt.spawn(lighthouse.clone().run()),
+                lighthouse: lighthouse,
+                _runtime: rt,
+            })
+        })
+    }
+
+    fn address(&self) -> PyResult<String> {
+        Ok(self.lighthouse.address().to_string())
+    }
+
+    fn shutdown(&self, py: Python<'_>) {
+        py.allow_threads(move || {
+            self.handle.abort();
+        })
+    }
+}
+
 #[pymodule]
 fn torchft(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // setup logging on import
@@ -212,6 +265,7 @@ fn torchft(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<Manager>()?;
     m.add_class::<ManagerClient>()?;
+    m.add_class::<Lighthouse>()?;
     m.add_function(wrap_pyfunction!(lighthouse_main, m)?)?;
 
     Ok(())
