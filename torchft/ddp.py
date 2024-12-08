@@ -44,12 +44,17 @@ class DistributedDataParallel(parallel.DistributedDataParallel):
       same across workers.
     """
 
-    def __init__(self, manager: "Manager", module: nn.Module, **args) -> None:
+    def __init__(self, manager: "Manager", module: nn.Module, **kwargs: object) -> None:
         # use a dummy PG to soak up the init all reduce, actual comms will go
         # through the comm_hook.
         pg = ProcessGroupDummy(0, 1)
 
-        super().__init__(module, process_group=pg, **args)
+        super().__init__(
+            module,
+            process_group=pg,
+            # pyre-fixme[6]: got object
+            **kwargs,
+        )
 
         self.register_comm_hook(manager, self._comm_hook)
 
@@ -70,12 +75,12 @@ class PureDistributedDataParallel(nn.Module):
     may be very slow for real models.
     """
 
-    def __init__(self, manager: "Manager", module: nn.Module):
+    def __init__(self, manager: "Manager", module: nn.Module) -> None:
         super().__init__()
 
         self.module = module
 
-        def post_grad_hook(p):
+        def post_grad_hook(p: torch.Tensor) -> None:
             if p.grad is not None:
                 manager.allreduce_grad(p.grad)
 

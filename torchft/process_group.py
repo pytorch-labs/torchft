@@ -20,7 +20,7 @@ import logging
 import threading
 from abc import ABC
 from datetime import timedelta
-from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Type
 
 import torch
 import torch.distributed as dist
@@ -49,7 +49,7 @@ from torch.futures import Future
 if TYPE_CHECKING:
     from torchft.manager import Manager
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 # TODO: use non strings which are cheaper
 _QUEUE_CLOSE = "queue_close"
@@ -57,7 +57,7 @@ _FUTURE_RESULT = "fut_result"
 _FUTURE_EXCEPTION = "fut_exception"
 
 
-def _get(queue: mp.Queue, timeout) -> object:
+def _get(queue: mp.Queue, timeout: float) -> object:
     v = queue.get(timeout=timeout)
     if isinstance(v, Exception):
         raise v
@@ -86,10 +86,11 @@ def create_store_client(store_addr: str) -> Store:
 
 
 class ProcessGroup(BaseProcessGroup):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        # pyre-fixme[6]: got object
         super().__init__(*args, **kwargs)
 
-        self._group_name = None
+        self._group_name: Optional[str] = None
 
     def configure(self, store_addr: str, rank: int, world_size: int) -> None:
         """
@@ -247,7 +248,9 @@ class ProcessGroupGloo(ProcessGroupWrapper):
     This is a reconfigurable version of ProcessGroupGloo.
     """
 
-    PG_CLASS = BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
+    PG_CLASS: Type[BaseProcessGroup] = (
+        BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
+    )
 
     def getBackendName(self) -> str:
         return "torchft-gloo"
@@ -264,23 +267,26 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
     abort when reconfiguring, we need to ensure this is safe.
     """
 
-    PG_CLASS = BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
+    PG_CLASS: Type[BaseProcessGroup] = (
+        BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
+    )
 
     def getBackendName(self) -> str:
         return "torchft-nccl"
 
 
 class _DummyWork(dist._Work):
-    def __init__(self, result):
+    def __init__(self, result: object) -> None:
         super().__init__()
         self.result_ = result
-        self.future_ = torch.futures.Future()
+        # pyre-fixme[29]: Future is not a function
+        self.future_: torch.futures.Future[object] = torch.futures.Future()
         self.future_.set_result(result)
 
-    def wait(self, timeout=None):
+    def wait(self, timeout: Optional[timedelta] = None) -> bool:
         return True
 
-    def get_future(self):
+    def get_future(self) -> torch.futures.Future[object]:
         return self.future_
 
 
@@ -302,18 +308,23 @@ class ProcessGroupDummy(ProcessGroup):
         self._world = world
         self.wait_count = 0
         self.get_future_count = 0
-        self._work = []
+        self._work: List[Work] = []
         self.configure_count = 0
 
     def configure(self, store_addr: str, rank: int, world_size: int) -> None:
         self.configure_count += 1
 
-    def broadcast(self, tensor_list, opts):
+    def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
         res = _DummyWork(tensor_list)
         self._work.append(res)
         return res
 
-    def allgather(self, output_tensors, input_tensor, opts):
+    def allgather(
+        self,
+        output_tensors: List[List[torch.Tensor]],
+        input_tensor: List[torch.Tensor],
+        opts: object,
+    ) -> Work:
         for o, i in zip(output_tensors[0], input_tensor):
             o.copy_(i)
 
@@ -321,15 +332,15 @@ class ProcessGroupDummy(ProcessGroup):
         self._work.append(res)
         return res
 
-    def allreduce(self, tensors, opts):
+    def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
         res = _DummyWork(tensors)
         self._work.append(res)
         return res
 
-    def size(self):
+    def size(self) -> int:
         return self._world
 
-    def getBackendName(self):
+    def getBackendName(self) -> str:
         return "torchft-dummy"
 
 
@@ -339,14 +350,14 @@ class _ErrorSwallowingWork(Work):
         pg: "ErrorSwallowingProcessGroupWrapper",
         work: Work,
         default_result: object,
-    ):
+    ) -> None:
         super().__init__()
 
         self._pg = pg
         self._work = work
         self._default_result = default_result
 
-    def wait(self, timeout=None) -> bool:
+    def wait(self, timeout: Optional[timedelta] = None) -> bool:
         try:
             self._work.wait()
         except Exception as e:
@@ -354,7 +365,7 @@ class _ErrorSwallowingWork(Work):
 
         return True
 
-    def get_future(self) -> Future:
+    def get_future(self) -> Future[object]:
         fut = self._work.get_future()
 
         # schedule error handling as a continuation on the Future
@@ -387,7 +398,7 @@ class ErrorSwallowingProcessGroupWrapper(ProcessGroupWrapper):
     def __init__(self, pg: ProcessGroup) -> None:
         super().__init__(pg)
 
-        self._error = None
+        self._error: Optional[Exception] = None
 
     def configure(self, store_addr: str, rank: int, world_size: int) -> None:
         self._error = None
@@ -465,7 +476,7 @@ class _BabyWork(Work):
         rx: mp.Queue,
         op_id: int,
         timeout: float,
-    ):
+    ) -> None:
         super().__init__()
 
         self._pg = pg
@@ -479,7 +490,7 @@ class _BabyWork(Work):
         assert _get(self._rx, self._timeout) == self._op_id
         return True
 
-    def get_future(self) -> Future:
+    def get_future(self) -> Future[object]:
         return self._pg._get_future(self._op_id)
 
 
@@ -514,12 +525,12 @@ class ProcessGroupBaby(ProcessGroup):
 
         self._world_size = -1
 
-        self._p = None
-        self._tx = None
-        self._rx = None
-        self._future_queue = None
-        self._future_thread = None
-        self._futures = {}
+        self._p: Optional[mp.Process] = None
+        self._tx: Optional[mp.Queue] = None
+        self._rx: Optional[mp.Queue] = None
+        self._future_queue: Optional[mp.Queue] = None
+        self._future_thread: Optional[threading.Thread] = None
+        self._futures: Dict[int, Future[object]] = {}
         self._futures_lock = threading.Lock()
 
         self._timeout = timeout
@@ -536,6 +547,7 @@ class ProcessGroupBaby(ProcessGroup):
             self._rx.close()
         if self._future_queue is not None:
             self._future_queue.put(_QUEUE_CLOSE)
+            assert self._future_queue is not None
             self._future_queue.close()
 
         ctx = mp.get_context("spawn")
@@ -578,7 +590,7 @@ class ProcessGroupBaby(ProcessGroup):
             pg = cls.PG_CLASS(store, rank, world_size)
 
             work = {}
-            next_op_id = 0
+            next_op_id: int = 0
 
             while True:
                 op = rx.get()
@@ -590,14 +602,14 @@ class ProcessGroupBaby(ProcessGroup):
                     tx.put(next_op_id)
                     next_op_id += 1
                 elif cmd == "wait":
-                    op_id = op[1]
+                    op_id: int = op[1]
                     work[op_id].wait()
                     del work[op_id]
                     tx.put(op_id)
                 elif cmd == "future":
-                    op_id = op[1]
+                    op_id: int = op[1]
 
-                    def callback(fut: Future):
+                    def callback(fut: Future[object]) -> None:
                         try:
                             fut.wait()
                             future_queue.put((op_id, _FUTURE_RESULT, None))
@@ -647,22 +659,32 @@ class ProcessGroupBaby(ProcessGroup):
         except Exception as e:
             logger.exception(f"got unexpected error in future handler: {e}")
 
-    def _get_future(self, op_id: int) -> Future:
+    def _get_future(self, op_id: int) -> Future[object]:
+
         with self._futures_lock:
             fut = Future()  # pyre-fixme[29]: is not a function
             self._futures[op_id] = fut
+            assert self._tx is not None
             self._tx.put(("future", op_id), timeout=self._timeout)
 
+        assert self._rx is not None
         assert _get(self._rx, self._timeout) == op_id
         # TODO: return correct tensor instead of None
         return fut
 
     def _run_func(self, func: str, *args: object, **kwargs: object) -> Work:
-        self._tx.put(("func", func, args, kwargs), timeout=self._timeout)
-        op_id = _get(self._rx, self._timeout)
+        rx = self._rx
+        tx = self._tx
+        assert rx is not None
+        assert tx is not None
+
+        tx.put(("func", func, args, kwargs), timeout=self._timeout)
+
+        op_id = _get(rx, self._timeout)
         assert isinstance(op_id, int), f"invalid return {op_id}"
+
         return self.WORK_CLASS(
-            pg=self, tx=self._tx, rx=self._rx, op_id=op_id, timeout=self._timeout
+            pg=self, tx=tx, rx=rx, op_id=op_id, timeout=self._timeout
         )
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
@@ -686,9 +708,11 @@ class ProcessGroupBabyGloo(ProcessGroupBaby):
     ProcessGroupBabyNCCL.
     """
 
-    PG_CLASS = BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
+    PG_CLASS: Type[BaseProcessGroup] = (
+        BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
+    )
 
-    def getBackendName(self):
+    def getBackendName(self) -> str:
         return "torchft-baby-gloo"
 
 
@@ -708,10 +732,12 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
     tensors may leak in the current PyTorch implementation. TODO fix
     """
 
-    PG_CLASS = BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
+    PG_CLASS: Type[BaseProcessGroup] = (
+        BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
+    )
     WORK_CLASS = _BabyWorkNCCL
 
-    def getBackendName(self):
+    def getBackendName(self) -> str:
         return "torchft-baby-nccl"
 
 

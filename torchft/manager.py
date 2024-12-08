@@ -25,6 +25,7 @@ and Hybrid FSDP.
 
 """
 
+import concurrent.futures
 import logging
 import os
 import socket
@@ -35,8 +36,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, cast
 
 import torch
-from torch.distributed import PrefixStore, ReduceOp, TCPStore, Work
-from torch.optim import Optimizer
+from torch.distributed import ReduceOp, TCPStore
 
 from torchft.checkpointing import CheckpointServer
 from torchft.torchft import Manager as _Manager, ManagerClient
@@ -81,8 +81,8 @@ class Manager:
     def __init__(
         self,
         pg: "ProcessGroup",
-        load_state_dict: Callable[[object], None],
-        state_dict: Callable[[], object],
+        load_state_dict: Callable[[T], None],
+        state_dict: Callable[[], T],
         min_replica_size: int,
         port: int = MANAGER_DEFAULT_PORT,
         use_async_quorum: bool = True,
@@ -124,14 +124,15 @@ class Manager:
         world_size = world_size or int(os.environ["WORLD_SIZE"])
         self._min_replica_size = min_replica_size
 
-        self._ckpt_server = CheckpointServer(
-            lambda: {
+        def _manager_state_dict() -> Dict[str, T]:
+            return {
                 "user": state_dict(),
-                "torchft": self.state_dict(),
+                "torchft": cast(T, self.state_dict()),
             }
-        )
+
+        self._ckpt_server = CheckpointServer[Dict[str, T]](_manager_state_dict)
         self._executor = ThreadPoolExecutor(max_workers=1)
-        self._quorum_future = None
+        self._quorum_future: Optional[concurrent.futures.Future] = None
 
         self._store = TCPStore(
             host_name=store_addr,
@@ -140,7 +141,7 @@ class Manager:
             wait_for_workers=False,
         )
         self._pg = pg
-        self._manager = None
+        self._manager: Optional[_Manager] = None
 
         if rank == 0:
             hostname = socket.gethostname()
@@ -208,6 +209,7 @@ class Manager:
             fut.set_result(grad)
             return fut
 
+        assert self._quorum_future is not None, "must call step before allreduce_grad"
         self._quorum_future.result()
 
         if not self.is_participating():
@@ -397,6 +399,7 @@ class Manager:
         assert self._healing, "must be in healing state"
 
         # synchronize on future
+        assert self._quorum_future is not None, "must call step before should_commit"
         self._quorum_future.result()
 
         assert self._pending_state_dict is not None, "checkpoint was not staged"

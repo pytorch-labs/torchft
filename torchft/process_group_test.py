@@ -62,6 +62,7 @@ class ProcessGroupTest(TestCase):
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3))
 
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.cuda.is_available(), "needs CUDA")
     def test_nccl(self) -> None:
         store = TCPStore(
@@ -128,13 +129,14 @@ class ProcessGroupTest(TestCase):
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3))
 
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.cuda.device_count() >= 2, "need two CUDA devices")
     def test_baby_nccl_2gpu(self) -> None:
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
 
-        store_addr = f"localhost:{store.port}/prefix"
+        store_addr: str = f"localhost:{store.port}/prefix"
 
         def run(rank: int) -> Tuple[torch.Tensor, Work]:
             a = ProcessGroupBabyNCCL()

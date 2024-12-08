@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
-from typing import Set, Tuple
+from typing import Dict, Set, Tuple
 from unittest import TestCase
 
 import torch
@@ -15,14 +15,14 @@ from torchft.torchft import Lighthouse
 
 
 class MyModel(nn.Module):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.model = nn.Sequential(
             nn.Linear(3, 4),
             nn.Sigmoid(),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
 
 
@@ -52,7 +52,7 @@ def worker_manager(
     lighthouse_address: str,
     failure_injector: FailureInjector,
     attempts: int = 3,
-) -> None:
+) -> Dict[str, Dict[str, object]]:
     for i in range(attempts):
         try:
             print(f"starting worker {replica_id} attempt {i}")
@@ -65,10 +65,12 @@ def worker_manager(
                 raise
             continue
 
+    raise RuntimeError("ran out of attempts")
+
 
 def train_loop(
     replica_id: int, lighthouse_address: str, failure_injector: FailureInjector
-) -> None:
+) -> Dict[str, Dict[str, object]]:
     with ExitStack() as stack:
         store = dist.TCPStore(
             host_name="localhost",
@@ -77,11 +79,11 @@ def train_loop(
             wait_for_workers=False,
         )
 
-        def load_state_dict(state_dict):
+        def load_state_dict(state_dict: Dict[str, Dict[str, object]]) -> None:
             m.load_state_dict(state_dict["model"])
             optimizer.load_state_dict(state_dict["optim"])
 
-        def state_dict():
+        def state_dict() -> Dict[str, Dict[str, object]]:
             return {
                 "model": m.state_dict(),
                 "optim": optimizer.state_dict(),
@@ -103,8 +105,10 @@ def train_loop(
         )
         stack.callback(manager.shutdown)
 
-        m = DistributedDataParallel(manager, MyModel())
-        optimizer = OptimizerWrapper(manager, optim.Adam(m.parameters()))
+        m: nn.Module = DistributedDataParallel(manager, MyModel())
+        optimizer: optim.Optimizer = OptimizerWrapper(
+            manager, optim.Adam(m.parameters())
+        )
         criterion = nn.CrossEntropyLoss()
 
         while True:
@@ -120,14 +124,16 @@ def train_loop(
             optimizer.step()
 
             if manager.current_step() >= 5:
-                # return state_dict so we can check consistency
-                return state_dict()
+                break
 
             failure_injector.check(manager.current_step())
 
+        # return state_dict so we can check consistency
+        return state_dict()
+
 
 class ManagerIntegTest(TestCase):
-    def test_ddp_healthy(self):
+    def test_ddp_healthy(self) -> None:
         lighthouse = Lighthouse(
             bind="[::]:0",
             min_replicas=2,
@@ -157,7 +163,7 @@ class ManagerIntegTest(TestCase):
         for state_dict in state_dicts:
             torch.testing.assert_close(state_dict, state_dicts[0])
 
-    def test_ddp_recovery(self):
+    def test_ddp_recovery(self) -> None:
         lighthouse = Lighthouse(
             bind="[::]:0",
             min_replicas=2,

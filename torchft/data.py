@@ -20,6 +20,7 @@ import torch.distributed as dist
 from torch.utils import data
 
 
+# pyre-fixme[24]: expected generic parameter
 class DistributedSampler(data.distributed.DistributedSampler):
     """
     DistributedSampler extends the standard PyTorch DistributedSampler with a
@@ -49,7 +50,7 @@ class DistributedSampler(data.distributed.DistributedSampler):
         num_replica_groups: int,
         rank: Optional[int] = None,
         num_replicas: Optional[int] = None,
-        **kwargs,
+        **kwargs: object,
     ) -> None:
         """
         Args:
@@ -64,12 +65,13 @@ class DistributedSampler(data.distributed.DistributedSampler):
         if num_replicas is None:
             num_replicas = dist.get_world_size()
 
-        self.global_rank = rank + num_replicas * replica_group
-        self.global_world_size = num_replicas * num_replica_groups
+        self.global_rank: int = rank + num_replicas * replica_group
+        self.global_world_size: int = num_replicas * num_replica_groups
 
         super().__init__(
             dataset,
             rank=self.global_rank,
             num_replicas=self.global_world_size,
+            # pyre-fixme[6]: got object
             **kwargs,
         )

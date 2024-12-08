@@ -51,12 +51,12 @@ class TestManager(TestCase):
         return manager
 
     @patch("torchft.manager.ManagerClient", autospec=True)
-    def test_manager(self, client_mock) -> None:
+    def test_manager(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
         self.assertEqual(client_mock.call_count, 1)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
-    def test_state_dict(self, client_mock) -> None:
+    def test_state_dict(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
 
         state_dict = manager.state_dict()
@@ -78,7 +78,7 @@ class TestManager(TestCase):
         self.assertEqual(manager.batches_committed(), 2345)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
-    def test_quorum_happy(self, client_mock) -> None:
+    def test_quorum_happy(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
         client_mock().should_commit = lambda rank, step, should_commit: should_commit
 
@@ -113,7 +113,7 @@ class TestManager(TestCase):
         self.assertEqual(manager.batches_committed(), 2)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
-    def test_quorum_heal_sync(self, client_mock) -> None:
+    def test_quorum_heal_sync(self, client_mock: MagicMock) -> None:
         manager = self._create_manager(use_async_quorum=False)
         client_mock().should_commit = lambda rank, step, should_commit: should_commit
 
@@ -153,7 +153,9 @@ class TestManager(TestCase):
         self.assertEqual(self.load_state_dict.call_count, 1)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
-    def test_quorum_heal_async_not_enough_participants(self, client_mock) -> None:
+    def test_quorum_heal_async_not_enough_participants(
+        self, client_mock: MagicMock
+    ) -> None:
         manager = self._create_manager(use_async_quorum=True, min_replica_size=2)
         client_mock().should_commit = lambda rank, step, should_commit: should_commit
 
@@ -177,6 +179,7 @@ class TestManager(TestCase):
         self.assertEqual(manager._step, 0)
 
         manager.step()
+        assert manager._quorum_future is not None
         manager._quorum_future.result()
         self.assertTrue(manager._healing)
         self.assertFalse(manager.is_participating())
@@ -204,7 +207,7 @@ class TestManager(TestCase):
         self.assertEqual(manager.batches_committed(), 0)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
-    def test_quorum_heal_async_zero_grad(self, client_mock) -> None:
+    def test_quorum_heal_async_zero_grad(self, client_mock: MagicMock) -> None:
         manager = self._create_manager(use_async_quorum=True, min_replica_size=1)
         client_mock().should_commit = lambda rank, step, should_commit: should_commit
 
@@ -228,6 +231,7 @@ class TestManager(TestCase):
         self.assertEqual(manager._step, 0)
 
         manager.step()
+        assert manager._quorum_future is not None
         manager._quorum_future.result()
         self.assertTrue(manager._healing)
 
@@ -253,7 +257,7 @@ class TestManager(TestCase):
         self.assertEqual(manager.batches_committed(), 1)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
-    def test_allreduce_error(self, client_mock) -> None:
+    def test_allreduce_error(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
         client_mock().should_commit = lambda rank, step, should_commit: should_commit
 
@@ -338,7 +342,7 @@ class TestManager(TestCase):
         self.assertTrue(manager.should_commit())
 
     @patch("torchft.manager.ManagerClient", autospec=True)
-    def test_quorum_fixed_world_size(self, client_mock) -> None:
+    def test_quorum_fixed_world_size(self, client_mock: MagicMock) -> None:
         # test active and spares
         for rank in [1, 2]:
             manager = self._create_manager(
@@ -375,7 +379,7 @@ class TestManager(TestCase):
             self.assertEqual(manager.batches_committed(), 2)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
-    def test_manager_report_error(self, client_mock) -> None:
+    def test_manager_report_error(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
 
         self.assertFalse(manager.errored())
@@ -383,7 +387,7 @@ class TestManager(TestCase):
         self.assertTrue(manager.errored())
 
     @patch("torchft.manager.ManagerClient", autospec=True)
-    def test_manager_wrap_future(self, client_mock) -> None:
+    def test_manager_wrap_future(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
 
         self.assertFalse(manager.errored())
@@ -398,7 +402,7 @@ class TestManager(TestCase):
         self.assertEqual(manager._pending_work, [wrapped_fut])
 
     @patch("torchft.manager.ManagerClient", autospec=True)
-    def test_manager_numerics(self, client_mock) -> None:
+    def test_manager_numerics(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
 
         manager._quorum_future = MagicMock()

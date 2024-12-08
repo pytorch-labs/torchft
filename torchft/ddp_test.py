@@ -18,7 +18,7 @@ from torchft.process_group import ProcessGroupBabyGloo, ProcessGroupGloo
 
 
 class TestDDP(TestCase):
-    def test_pure_ddp(self):
+    def test_pure_ddp(self) -> None:
         manager = create_autospec(Manager)
 
         m = nn.Linear(3, 4)
@@ -34,7 +34,7 @@ class TestDDP(TestCase):
 
         self.assertEqual(manager.allreduce_grad.call_count, len(list(m.parameters())))
 
-    def test_ddp(self):
+    def test_ddp(self) -> None:
         manager = create_autospec(Manager)
 
         call_count = 0
