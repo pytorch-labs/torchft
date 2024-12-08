@@ -44,9 +44,9 @@ impl Manager {
         bind: String,
         store_addr: String,
         world_size: u64,
-    ) -> Self {
+    ) -> PyResult<Self> {
         py.allow_threads(move || {
-            let runtime = Runtime::new().unwrap();
+            let runtime = Runtime::new()?;
             let manager = runtime
                 .block_on(manager::Manager::new(
                     replica_id,
@@ -56,13 +56,13 @@ impl Manager {
                     store_addr,
                     world_size,
                 ))
-                .unwrap();
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             let handle = runtime.spawn(manager.clone().run());
-            Self {
+            Ok(Self {
                 handle: handle,
                 manager: manager,
                 _runtime: runtime,
-            }
+            })
         })
     }
 
@@ -89,7 +89,7 @@ impl ManagerClient {
     #[new]
     fn new(py: Python<'_>, addr: String, timeout: Duration) -> PyResult<Self> {
         py.allow_threads(move || {
-            let runtime = Runtime::new().unwrap();
+            let runtime = Runtime::new()?;
             let client = runtime
                 .block_on(manager::manager_client_new(addr, timeout))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -193,14 +193,16 @@ fn reset_python_signals(py: Python<'_>) -> PyResult<()> {
 }
 
 #[pyfunction]
-fn lighthouse_main(py: Python<'_>) {
-    reset_python_signals(py).unwrap();
+fn lighthouse_main(py: Python<'_>) -> PyResult<()> {
+    reset_python_signals(py)?;
 
     let mut args = env::args();
     args.next(); // discard binary arg
     let opt = lighthouse::LighthouseOpt::from_iter(args);
-    let rt = Runtime::new().unwrap();
-    rt.block_on(lighthouse_main_async(opt)).unwrap();
+    let rt = Runtime::new()?;
+    rt.block_on(lighthouse_main_async(opt))
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    Ok(())
 }
 
 async fn lighthouse_main_async(opt: lighthouse::LighthouseOpt) -> Result<()> {
@@ -223,7 +225,7 @@ impl Lighthouse {
     #[new]
     fn new(py: Python<'_>, bind: String, min_replicas: u64) -> PyResult<Self> {
         py.allow_threads(move || {
-            let rt = Runtime::new().unwrap();
+            let rt = Runtime::new()?;
 
             let lighthouse = rt
                 .block_on(lighthouse::Lighthouse::new(lighthouse::LighthouseOpt {
@@ -232,7 +234,7 @@ impl Lighthouse {
                     join_timeout_ms: 100,
                     quorum_tick_ms: 100,
                 }))
-                .unwrap();
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
             Ok(Self {
                 handle: rt.spawn(lighthouse.clone().run()),
@@ -261,7 +263,7 @@ fn torchft(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .show_module_names(true)
         .timestamp(stderrlog::Timestamp::Millisecond)
         .init()
-        .unwrap();
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
     m.add_class::<Manager>()?;
     m.add_class::<ManagerClient>()?;

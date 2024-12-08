@@ -140,6 +140,7 @@ class Manager:
             wait_for_workers=False,
         )
         self._pg = pg
+        self._manager = None
 
         if rank == 0:
             hostname = socket.gethostname()
@@ -148,7 +149,8 @@ class Manager:
             lighthouse_addr = lighthouse_addr or os.environ["TORCHFT_LIGHTHOUSE"]
 
             if replica_id is None:
-                replica_id = str(uuid.uuid4())
+                replica_id = ""
+            replica_id = replica_id + str(uuid.uuid4())
             self._manager = _Manager(
                 replica_id=replica_id,
                 lighthouse_addr=lighthouse_addr,
@@ -180,6 +182,8 @@ class Manager:
         Shutdown the manager and checkpoint server.
         """
         self._ckpt_server.shutdown()
+        if self._manager is not None:
+            self._manager.shutdown()
 
     def allreduce_grad(self, grad: torch.Tensor) -> torch.futures.Future[torch.Tensor]:
         """
@@ -364,7 +368,7 @@ class Manager:
                 self._participating_rank = None
 
         if quorum_id != self._quorum_id:
-            logger.info(f"reconfiguring for quorum_id {quorum_id}")
+            logger.info(f"{replica_rank=} reconfiguring for quorum_id {quorum_id}")
             store_prefixed_addr = f"{store_address}/torchft/{quorum_id}/{self._rank}"
             # We use the replica rank and world as we want all replicas in the PG.
             self._pg.configure(store_prefixed_addr, replica_rank, replica_world_size)
@@ -373,7 +377,7 @@ class Manager:
         # See manager.rs for healing conditions
         if heal:
             self._healing = True
-            logger.info("healing required")
+            logger.info(f"{replica_rank}= healing required")
 
             logger.info(f"fetching checkpoint server address from {address}")
             primary_client = ManagerClient(address, timeout=self._timeout)
