@@ -12,11 +12,10 @@ Easy Per Step Fault Tolerance for PyTorch
 
 ---
 
-> ⚠️ WARNING: This is a prototype for PyTorch fault tolerance and may have bugs
-> or breaking changes as this is actively under development. This is a public
-> repo to encourage collaboration and contributions are welcome. There currently
-> are no plans to make this a stable component of PyTorch Distributed and may be
-> abandonded at any time if better approachs arise.
+> ⚠️ WARNING: This is an alpha prototype for PyTorch fault tolerance and may have bugs
+> or breaking changes as this is actively under development. We'd love to collaborate
+> and contributions are welcome. Please reach out if you're interested in torchft
+> or want to discuss fault tolerance in PyTorch
 
 This repository implements techniques for doing a per-step fault tolerance so
 you can keep training if errors occur without interrupting the entire training
