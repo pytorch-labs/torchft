@@ -1,4 +1,16 @@
-# torchft -- per step fault tolerance for any PyTorch job
+<p align="center">
+  <img width="55%" src="https://github.com/user-attachments/assets/9cd7fef9-cfff-409f-a033-d53811f3a99c" alt="torchft logo">
+</p>
+
+<h3 align="center">
+Easy Per Step Fault Tolerance for PyTorch
+</h3>
+
+<p align="center">
+| <a href="https://pytorch-labs.github.io/torchft/"><b>Documentation</b></a> | <a href="https://github.com/pytorch-labs/torchft/blob/main/media/fault_tolerance_poster.pdf"><b>Poster</b></a> |
+</p>
+
+---
 
 > ⚠️ WARNING: This is a prototype for PyTorch fault tolerance and may have bugs
 > or breaking changes as this is actively under development. This is a public
