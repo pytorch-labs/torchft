@@ -1,5 +1,8 @@
 <p align="center">
-  <img width="55%" src="https://github.com/user-attachments/assets/9cd7fef9-cfff-409f-a033-d53811f3a99c" alt="torchft logo">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/ab57f551-7a66-4e5f-a3e6-c4d033a5863d">
+    <img width="55%" src="https://github.com/user-attachments/assets/9cd7fef9-cfff-409f-a033-d53811f3a99c" alt="torchft">
+  </picture>
 </p>
 
 <h3 align="center">
