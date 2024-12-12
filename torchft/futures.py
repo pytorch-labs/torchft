@@ -2,6 +2,7 @@ import asyncio
 import threading
 from datetime import timedelta
 from typing import Optional, TypeVar
+from unittest.mock import Mock
 
 from torch.futures import Future
 
@@ -47,7 +48,9 @@ class _TimeoutManager:
             if self._event_loop is None:
                 self._event_loop = asyncio.new_event_loop()
                 self._event_loop_thread = threading.Thread(
-                    target=self._event_loop.run_forever, daemon=True
+                    target=self._event_loop.run_forever,
+                    daemon=True,
+                    name="TimeoutManager",
                 )
                 self._event_loop_thread.start()
             # pyre-fixme[7]: optional
@@ -69,6 +72,10 @@ class _TimeoutManager:
         """
         Registers a future that will be cancelled after the specified timeout.
         """
+        # bypass timeout for mock futures
+        if isinstance(fut, Mock):
+            return fut
+
         loop = self._maybe_start_event_loop()
 
         # pyre-fixme[29]: Future is not a function

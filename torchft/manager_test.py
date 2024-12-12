@@ -385,24 +385,43 @@ class TestManager(TestCase):
     def test_manager_report_error(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
 
-        self.assertFalse(manager.errored())
-        manager.report_error()
-        self.assertTrue(manager.errored())
+        self.assertIsNone(manager.errored())
+        e = RuntimeError("some error")
+        manager.report_error(e)
+        self.assertIs(manager.errored(), e)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_manager_wrap_future(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
 
+        self.assertIsNone(manager.errored())
+
+        fut = torch.futures.Future()  # pyre-fixme[29]: not a function
+        wrapped_fut = manager.wrap_future(fut, 2)
+        self.assertIsNone(manager.errored())
+
+        e = RuntimeError("injected failure")
+        fut.set_exception(e)
+        self.assertIs(manager.errored(), e)
+        self.assertEqual(wrapped_fut.value(), 2)
+
+        self.assertEqual(manager._pending_work, [wrapped_fut])
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_manager_wrap_future_timeout(self, client_mock: MagicMock) -> None:
+        manager = self._create_manager(timeout=timedelta(seconds=0.01))
+
         self.assertFalse(manager.errored())
 
         fut = torch.futures.Future()  # pyre-fixme[29]: not a function
         wrapped_fut = manager.wrap_future(fut, 2)
-
-        fut.set_exception(RuntimeError("injected failure"))
-
-        self.assertEqual(wrapped_fut.value(), 2)
-        self.assertTrue(manager.errored())
-        self.assertEqual(manager._pending_work, [wrapped_fut])
+        wrapped_fut.wait()
+        error = manager.errored()
+        self.assertIsNotNone(error)
+        with self.assertRaisesRegex(
+            TimeoutError, "future did not complete within.*0.01"
+        ):
+            raise error
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_manager_numerics(self, client_mock: MagicMock) -> None:

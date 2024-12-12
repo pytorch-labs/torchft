@@ -458,7 +458,7 @@ class ManagedProcessGroup(ErrorSwallowingProcessGroupWrapper):
         """
         super().report_error(e)
 
-        self._manager.report_error()
+        self._manager.report_error(e)
 
     def size(self) -> int:
         return self._manager.num_participants()

@@ -39,6 +39,7 @@ import torch
 from torch.distributed import ReduceOp, TCPStore
 
 from torchft.checkpointing import CheckpointServer
+from torchft.futures import future_timeout
 from torchft.torchft import Manager as _Manager, ManagerClient
 
 if TYPE_CHECKING:
@@ -168,7 +169,7 @@ class Manager:
 
         self._step = 0
         self._quorum_id = -1
-        self._errored = False
+        self._errored: Optional[Exception] = None
         self._healing = False
         self._pending_work: List[torch.futures.Future[object]] = []
         self._batches_committed = 0
@@ -241,13 +242,13 @@ class Manager:
 
         except Exception as e:
             logger.exception(f"got exception in all reduce -- skipping remaining: {e}")
-            self.report_error()
+            self.report_error(e)
 
             fut = torch.futures.Future()  # pyre-fixme[29]: not a function
             fut.set_result(grad)
             return fut
 
-    def report_error(self) -> None:
+    def report_error(self, e: Exception) -> None:
         """
         Report an error to the manager.
 
@@ -257,14 +258,14 @@ class Manager:
         This should be called when an error occurs that leads to a corrupted
         gradient that needs to be discarded.
         """
-        self._errored = True
+        self._errored = e
 
-    def errored(self) -> bool:
+    def errored(self) -> Optional[Exception]:
         """
         Get whether an error has occurred.
 
         Returns:
-            whether an error has occurred
+            The error or None if no error has occured.
         """
         return self._errored
 
@@ -281,6 +282,9 @@ class Manager:
             default: the default value to complete the Future with if an error occurs
         """
 
+        # add a timeout to the future
+        fut = future_timeout(fut, self._timeout)
+
         # schedule error handling as a continuation on the Future
         def callback(
             fut: torch.futures.Future[T],
@@ -291,7 +295,7 @@ class Manager:
                 return fut.value()
             except Exception as e:
                 logger.exception(f"got exception in future -- skipping remaining: {e}")
-                self.report_error()
+                self.report_error(e)
                 return default
 
         fut = fut.then(callback)
@@ -313,7 +317,7 @@ class Manager:
             self._step += 1
             self._batches_committed += self.num_participants()
 
-        self._errored = False
+        self._errored = None
         self._healing = False
         self._ckpt_server.allow_checkpoint(self._step)
 
@@ -428,7 +432,7 @@ class Manager:
         """
         for work in self._pending_work:
             # check at the beginning of since .wait() may trigger errors
-            if self._errored:
+            if self._errored is not None:
                 break
 
             # We swallow the error at in a future then callback so this will
@@ -442,7 +446,7 @@ class Manager:
             self._apply_pending_state_dict()
 
         enough_replicas = self.num_participants() >= self._min_replica_size
-        local_should_commit = enough_replicas and not self._errored
+        local_should_commit = enough_replicas and self._errored is None
         should_commit = self._client.should_commit(
             self._rank, self._step, local_should_commit
         )
