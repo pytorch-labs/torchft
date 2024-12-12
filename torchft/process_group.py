@@ -20,15 +20,11 @@ import logging
 import threading
 from abc import ABC
 from datetime import timedelta
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Dict, List, Optional, Type
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from torch._C._distributed_c10d import (
-    _register_process_group,
-    _unregister_process_group,
-)
 
 # pyre-fixme[21]: no attribute ProcessGroupNCCL
 # pyre-fixme[21]: no attribute ProcessGroupGloo

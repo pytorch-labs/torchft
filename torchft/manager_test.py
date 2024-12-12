@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from datetime import timedelta
 from unittest import TestCase
 from unittest.mock import MagicMock, create_autospec, patch
 
@@ -24,6 +25,7 @@ class TestManager(TestCase):
         use_async_quorum: bool = True,
         min_replica_size: int = 2,
         world_size_mode: WorldSizeMode = WorldSizeMode.DYNAMIC,
+        timeout: timedelta = timedelta(seconds=60),
     ) -> Manager:
         pg = create_autospec(ProcessGroup)
         self.store = TCPStore(
@@ -47,6 +49,7 @@ class TestManager(TestCase):
                 state_dict=lambda: {},
                 use_async_quorum=use_async_quorum,
                 world_size_mode=world_size_mode,
+                timeout=timeout,
             )
         return manager
 
