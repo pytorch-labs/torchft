@@ -436,10 +436,40 @@ class ErrorSwallowingProcessGroupWrapper(ProcessGroupWrapper):
             return _DummyWork(tensors)
 
 
-class ManagedProcessGroup(ErrorSwallowingProcessGroupWrapper):
+class _ManagedWork(Work):
+    def __init__(self, manager: "Manager", work: Work, default_result: object) -> None:
+        super().__init__()
+
+        self._manager = manager
+        self._work = work
+        self._default_result = default_result
+
+    def wait(self, timeout: Optional[timedelta] = None) -> bool:
+        try:
+            if timeout is not None:
+                self._work.wait(timeout)
+            else:
+                self._work.wait()
+        except Exception as e:
+            self._manager.report_error(e)
+
+        return True
+
+    def get_future(self) -> Future[object]:
+        return self._manager.wrap_future(self._work.get_future(), self._default_result)
+
+
+class ManagedProcessGroup(ProcessGroupWrapper):
     """
     This is a wrapper around any ProcessGroup that is managed by a torchft
     Manager.
+
+    This uses the ProcessGroup that is configured in the Manager. The world size
+    is dynamic and will report the number of active particpants in the quorum to
+    the model.
+
+    Any errors will be asynchronously reported to the manager and only successes
+    will be returned to the caller.
     """
 
     def __init__(self, manager: "Manager") -> None:
@@ -447,18 +477,21 @@ class ManagedProcessGroup(ErrorSwallowingProcessGroupWrapper):
 
         self._manager = manager
 
-    def report_error(self, e: Exception) -> None:
-        """
-        Report an error to this process group. This will cause all future
-        operations to be skipped until the process group is reconfigured via
-        ``configure``.
+    def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
+        if self._manager.errored() is not None:
+            return _DummyWork(tensors)
 
-        Args:
-            e: exception to report
-        """
-        super().report_error(e)
+        try:
+            work = super().allreduce(tensors, opts)
+        except Exception as e:
+            self._manager.report_error(e)
+            return _DummyWork(tensors)
 
-        self._manager.report_error(e)
+        return _ManagedWork(
+            self._manager,
+            work,
+            tensors,
+        )
 
     def size(self) -> int:
         return self._manager.num_participants()

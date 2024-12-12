@@ -29,6 +29,7 @@ from torchft.process_group import (
     ProcessGroupWrapper,
     _DummyWork,
     _ErrorSwallowingWork,
+    _ManagedWork,
     extend_device_mesh,
 )
 
@@ -238,13 +239,19 @@ class ProcessGroupTest(TestCase):
 
     def test_managed_process_group(self) -> None:
         manager = Mock(spec=Manager)
+        manager.errored.return_value = None
         manager._pg = ProcessGroupDummy(0, 1)
         pg = ManagedProcessGroup(manager)
         manager.num_participants.return_value = 123
 
         self.assertEqual(pg.size(), 123)
 
-        err = RuntimeError("test")
-        pg.report_error(err)
-        self.assertEqual(pg.error(), err)
-        self.assertEqual(manager.report_error.call_count, 1)
+        t = torch.zeros(10)
+        work = pg.allreduce([t], ReduceOp.SUM)
+        self.assertIsInstance(work, _ManagedWork)
+        work.wait()
+        fut = work.get_future()
+        fut.wait()
+
+        self.assertEqual(manager.report_error.call_count, 0)
+        self.assertEqual(manager.wrap_future.call_count, 1)
