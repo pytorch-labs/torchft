@@ -52,6 +52,12 @@ class DistributedDataParallel(parallel.DistributedDataParallel):
         super().__init__(
             module,
             process_group=pg,
+            # HACK: This forces the reducer to never rebuild buckets.
+            # The reducer normally rebuilds the buckets after the first training
+            # step which can improve performance but is incompatible with
+            # torchft as it will cause the buckets to diverge for recovering
+            # replicas.
+            find_unused_parameters=True,
             # pyre-fixme[6]: got object
             **kwargs,
         )

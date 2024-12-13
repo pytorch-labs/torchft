@@ -19,7 +19,8 @@ dependencies = [
 dev = [
     "pytest",
     "black",
-    "pyre-check"
+    "pyre-check",
+    "parameterized"
 ]
 
 [tool.maturin]

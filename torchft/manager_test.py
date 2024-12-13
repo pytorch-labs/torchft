@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, create_autospec, patch
 import torch
 from torch.distributed import TCPStore
 
-from torchft.manager import MANAGER_ADDR_KEY, Manager, WorldSizeMode
+from torchft.manager import MANAGER_ADDR_KEY, REPLICA_ID_KEY, Manager, WorldSizeMode
 from torchft.process_group import ProcessGroup, _DummyWork
 from torchft.torchft import ManagerClient
 
@@ -32,6 +32,7 @@ class TestManager(TestCase):
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
         self.store.set(MANAGER_ADDR_KEY, "dummy")
+        self.store.set(REPLICA_ID_KEY, "dummy_id")
         with patch(
             "os.environ",
             {
@@ -315,14 +316,16 @@ class TestManager(TestCase):
         )
         manager.step()
 
+        self.assertFalse(manager._errored)
+
         bad_fut = torch.futures.Future()  # pyre-fixme[29]: not a function
         bad_fut.set_exception(RuntimeError("injected failure"))
         manager._pg.allreduce.return_value.get_future.return_value = bad_fut
         manager.allreduce_grad(torch.tensor([1.0])).wait()
+        self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 2)
         self.assertTrue(manager._errored)
         self.assertFalse(manager.should_commit())
         self.assertTrue(manager._errored)
-        self.assertEqual(manager._pg.allreduce.return_value.get_future.call_count, 2)
 
         # cleanup
         manager._pg.allreduce.reset_mock(return_value=True)

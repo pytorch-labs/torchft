@@ -45,10 +45,9 @@ from torchft.torchft import Manager as _Manager, ManagerClient
 if TYPE_CHECKING:
     from torchft.process_group import ProcessGroup
 
-logger: logging.Logger = logging.getLogger(__name__)
-
 MANAGER_ADDR_KEY: str = "manager_addr"
 MANAGER_DEFAULT_PORT: int = int(os.environ.get("TORCHFT_MANAGER_PORT", 29511))
+REPLICA_ID_KEY: str = "replica_id"
 
 T = TypeVar("T")
 
@@ -132,7 +131,9 @@ class Manager:
             }
 
         self._ckpt_server = CheckpointServer[Dict[str, T]](_manager_state_dict)
-        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="async_quorum"
+        )
         self._quorum_future: Optional[concurrent.futures.Future] = None
 
         self._store = TCPStore(
@@ -163,9 +164,15 @@ class Manager:
             )
 
             self._store.set(MANAGER_ADDR_KEY, addr)
+            self._store.set(REPLICA_ID_KEY, replica_id)
 
         addr = self._store.get(MANAGER_ADDR_KEY).decode("utf-8")
         self._client = ManagerClient(addr, timeout=timeout)
+
+        replica_id = self._store.get(REPLICA_ID_KEY).decode("utf-8")
+        self._logger = _ManagerLogger(
+            manager=self, replica_id=replica_id or "", rank=rank
+        )
 
         self._step = 0
         self._quorum_id = -1
@@ -230,6 +237,7 @@ class Manager:
             ) -> torch.Tensor:
                 nonlocal grad
 
+                # check for exceptions
                 fut.value()
 
                 grad /= self.num_participants()
@@ -241,7 +249,9 @@ class Manager:
             return fut
 
         except Exception as e:
-            logger.exception(f"got exception in all reduce -- skipping remaining: {e}")
+            self._logger.exception(
+                f"got exception in all reduce -- skipping remaining: {e}"
+            )
             self.report_error(e)
 
             fut = torch.futures.Future()  # pyre-fixme[29]: not a function
@@ -294,7 +304,9 @@ class Manager:
             try:
                 return fut.value()
             except Exception as e:
-                logger.exception(f"got exception in future -- skipping remaining: {e}")
+                self._logger.exception(
+                    f"got exception in future -- skipping remaining: {e}"
+                )
                 self.report_error(e)
                 return default
 
@@ -328,12 +340,13 @@ class Manager:
         if not self._use_async_quorum:
             self._quorum_future.result()
 
-            # eagerly apply pending state_dict so we can run the forwards pass
-            self._apply_pending_state_dict()
+            if self._healing:
+                # eagerly apply pending state_dict so we can run the forwards pass
+                self._apply_pending_state_dict()
 
-            # we are forcing healing at the beginning so we're in a good state
-            # and don't need to zero_grad
-            self._healing = False
+                # we are forcing healing at the beginning so we're in a good state
+                # and don't need to zero_grad
+                self._healing = False
 
     def _async_quorum(self) -> None:
         (
@@ -374,8 +387,9 @@ class Manager:
                 self._participating_rank = None
 
         if quorum_id != self._quorum_id:
-            logger.info(f"{replica_rank=} reconfiguring for quorum_id {quorum_id}")
             store_prefixed_addr = f"{store_address}/torchft/{quorum_id}/{self._rank}"
+
+            self._logger.info(f"reconfiguring for {quorum_id=} {store_prefixed_addr=}")
             # We use the replica rank and world as we want all replicas in the PG.
             self._pg.configure(store_prefixed_addr, replica_rank, replica_world_size)
             self._quorum_id = quorum_id
@@ -383,12 +397,13 @@ class Manager:
         # See manager.rs for healing conditions
         if heal:
             self._healing = True
-            logger.info(f"{replica_rank}= healing required")
-
-            logger.info(f"fetching checkpoint server address from {address}")
+            self._logger.info(
+                f"healing required, fetching checkpoint server address from {address=} {max_step=}"
+            )
             primary_client = ManagerClient(address, timeout=self._timeout)
             checkpoint_server_address = primary_client.checkpoint_address(self._rank)
 
+            self._logger.info(f"fetching checkpoint from {checkpoint_server_address=}")
             self._pending_state_dict = CheckpointServer.load_from_address(
                 checkpoint_server_address
             )
@@ -406,8 +421,9 @@ class Manager:
         assert self._quorum_future is not None, "must call step before should_commit"
         self._quorum_future.result()
 
-        assert self._pending_state_dict is not None, "checkpoint was not staged"
+        self._logger.info("applying pending state dict")
 
+        assert self._pending_state_dict is not None, "checkpoint was not staged"
         self._load_state_dict(self._pending_state_dict["user"])
         self._pending_state_dict = None
 
@@ -450,7 +466,7 @@ class Manager:
         should_commit = self._client.should_commit(
             self._rank, self._step, local_should_commit
         )
-        logger.info(
+        self._logger.info(
             f"should_commit={should_commit} enough_replicas={enough_replicas}, errored={self._errored}"
         )
 
@@ -534,3 +550,25 @@ class Manager:
             assert self._use_async_quorum
             return False
         return True
+
+
+class _ManagerLogger:
+    def __init__(self, manager: Manager, replica_id: str, rank: int) -> None:
+        self._logger: logging.Logger = logging.getLogger(__name__)
+        self._replica_id = replica_id
+        self._rank = rank
+        self._manager = manager
+
+    def prefix(self) -> str:
+        return (
+            f"[{self._replica_id}/{self._rank} - step {self._manager.current_step()}]"
+        )
+
+    def info(self, msg: str) -> None:
+        self._logger.info(f"{self.prefix()} {msg}")
+
+    def warn(self, msg: str) -> None:
+        self._logger.warn(f"{self.prefix()} {msg}")
+
+    def exception(self, msg: str) -> None:
+        self._logger.exception(f"{self.prefix()} {msg}")
