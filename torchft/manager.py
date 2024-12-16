@@ -193,6 +193,7 @@ class Manager:
         self._ckpt_server.shutdown()
         if self._manager is not None:
             self._manager.shutdown()
+        self._executor.shutdown()
 
     def allreduce_grad(self, grad: torch.Tensor) -> torch.futures.Future[torch.Tensor]:
         """
@@ -314,15 +315,16 @@ class Manager:
         self._pending_work.append(cast(torch.futures.Future[object], fut))
         return fut
 
-    def step(self) -> None:
+    def start_step(self) -> None:
         """
         .. note::
             We recommend using the :py:class:`torchft.optim.OptimizerWrapper` instead of calling this directly.
 
-        Must be called before the forwards pass of each step.
-
         Computes a new quorum (potentially asynchronously) and readies the
         manager for a new step.
+
+        Must be called before the forwards pass of each step for best
+        performance as computing quorum may take some time.
         """
 
         if self._should_step:

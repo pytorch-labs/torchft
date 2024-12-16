@@ -45,7 +45,7 @@ class OptimizerWrapper(Optimizer):
         return self.optim.state_dict()
 
     def zero_grad(self, set_to_none: bool = True) -> None:
-        self.manager.step()
+        self.manager.start_step()
         self.optim.zero_grad(set_to_none)
 
     def step(self, closure: Optional[object] = None) -> None:

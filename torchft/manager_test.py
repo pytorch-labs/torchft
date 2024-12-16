@@ -102,7 +102,7 @@ class TestManager(TestCase):
         self.assertEqual(manager._step, 0)
         self.assertEqual(manager.batches_committed(), 0)
 
-        manager.step()
+        manager.start_step()
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         self.assertEqual(len(manager._pending_work), 1)
         self.assertTrue(manager.should_commit())
@@ -113,7 +113,7 @@ class TestManager(TestCase):
         # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
 
-        manager.step()
+        manager.start_step()
         self.assertEqual(manager.batches_committed(), 2)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
@@ -140,7 +140,7 @@ class TestManager(TestCase):
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager._step, 0)
 
-        manager.step()
+        manager.start_step()
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         self.assertFalse(manager._healing)
         self.assertTrue(manager.is_participating())
@@ -182,7 +182,7 @@ class TestManager(TestCase):
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager._step, 0)
 
-        manager.step()
+        manager.start_step()
         assert manager._quorum_future is not None
         manager._quorum_future.result()
         self.assertTrue(manager._healing)
@@ -206,7 +206,7 @@ class TestManager(TestCase):
         self.assertEqual(self.load_state_dict.call_count, 1)
 
         # failed to commit so no step
-        manager.step()
+        manager.start_step()
         self.assertEqual(manager._step, 20)
         self.assertEqual(manager.batches_committed(), 0)
 
@@ -234,7 +234,7 @@ class TestManager(TestCase):
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager._step, 0)
 
-        manager.step()
+        manager.start_step()
         assert manager._quorum_future is not None
         manager._quorum_future.result()
         self.assertTrue(manager._healing)
@@ -256,7 +256,7 @@ class TestManager(TestCase):
 
         self.assertEqual(self.load_state_dict.call_count, 1)
 
-        manager.step()
+        manager.start_step()
         self.assertEqual(manager._step, 21)
         self.assertEqual(manager.batches_committed(), 1)
 
@@ -280,7 +280,7 @@ class TestManager(TestCase):
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager._step, 0)
 
-        manager.step()
+        manager.start_step()
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
@@ -314,7 +314,7 @@ class TestManager(TestCase):
             2,  # max_world_size
             False,  # heal
         )
-        manager.step()
+        manager.start_step()
 
         self.assertFalse(manager._errored)
 
@@ -343,7 +343,7 @@ class TestManager(TestCase):
             False,  # heal
         )
 
-        manager.step()
+        manager.start_step()
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         self.assertTrue(manager.should_commit())
 
@@ -375,13 +375,13 @@ class TestManager(TestCase):
             self.assertEqual(manager._step, 0)
             self.assertEqual(manager.batches_committed(), 0)
 
-            manager.step()
+            manager.start_step()
             manager.allreduce_grad(torch.tensor([1.0])).wait()
 
             self.assertEqual(manager.is_participating(), rank != 2)
             self.assertEqual(manager.num_participants(), 2)
 
-            manager.step()
+            manager.start_step()
             self.assertEqual(manager.batches_committed(), 2)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
