@@ -67,6 +67,14 @@ lintrunner -a
 
 ### Tests
 
+We use `pytest` as our testing framework. To execute a specific test, use the following command:
+
+```sh
+pytest torchft/process_group_test.py -k test_device_mesh
+```
+
+To run the entire suite of tests:
+
 ```sh
 $ scripts/test.sh
 ```
