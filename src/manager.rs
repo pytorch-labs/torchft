@@ -239,7 +239,8 @@ impl ManagerService for Arc<Manager> {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let participants = &quorum.participants;
+        let mut participants = quorum.participants.clone();
+        participants.sort_by(|a, b| a.replica_id.cmp(&b.replica_id));
 
         let mut replica_rank = 10000000000;
         for (i, p) in participants.iter().enumerate() {
@@ -266,7 +267,7 @@ impl ManagerService for Arc<Manager> {
         // Decide whether we should be healing:
         // 1. if we're not at the max step
         // 2. if everyone is at the first step and we're not the primary
-        let heal = max_step != req.step || max_step == 1 && primary.replica_id != self.replica_id;
+        let heal = max_step != req.step || max_step == 0 && primary.replica_id != self.replica_id;
         if heal {
             info!(
                 "healing is required step={}, max_step={}",
@@ -472,6 +473,71 @@ mod tests {
         assert_eq!(resp.replica_rank, 0);
         assert_eq!(resp.replica_world_size, 1);
         assert_eq!(resp.heal, false);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_quorum_heal_first_step() -> Result<()> {
+        let lighthouse = Lighthouse::new(LighthouseOpt {
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 100,
+            min_replicas: 2,
+            quorum_tick_ms: 100,
+        })
+        .await?;
+        let lighthouse_fut = tokio::spawn(lighthouse.clone().run());
+
+        let mut manager_futs: Vec<tokio::task::JoinHandle<Result<ManagerQuorumResponse>>> =
+            Vec::new();
+
+        for replica_id in 0..2 {
+            let lighthouse_addr = lighthouse.address();
+            manager_futs.push(tokio::spawn(async move {
+                let manager = Manager::new(
+                    format!("rep_{}", replica_id),
+                    lighthouse_addr,
+                    "addr".to_string(),
+                    "[::]:0".to_string(),
+                    "store_addr".to_string(),
+                    1, // world size
+                )
+                .await?;
+                let manager_fut = tokio::spawn(manager.clone().run());
+
+                let mut client =
+                    manager_client_new(manager.address(), Duration::from_secs(10)).await?;
+
+                let request = tonic::Request::new(ManagerQuorumRequest {
+                    rank: 0,
+                    step: 0,
+                    checkpoint_server_addr: "addr".to_string(),
+                });
+
+                let result = client.quorum(request).await?.into_inner();
+
+                manager_fut.abort();
+
+                Ok(result)
+            }));
+        }
+
+        let resp_a = manager_futs.swap_remove(0).await??;
+        let resp_b = manager_futs.swap_remove(0).await??;
+
+        lighthouse_fut.abort();
+
+        assert_eq!(resp_a.quorum_id, 1);
+        assert_eq!(resp_a.max_step, 0);
+        assert_eq!(resp_a.replica_rank, 0);
+        assert_eq!(resp_a.replica_world_size, 2);
+        assert_eq!(resp_a.heal, false);
+
+        assert_eq!(resp_b.quorum_id, 1);
+        assert_eq!(resp_b.max_step, 0);
+        assert_eq!(resp_b.replica_rank, 1);
+        assert_eq!(resp_b.replica_world_size, 2);
+        assert_eq!(resp_b.heal, true);
 
         Ok(())
     }

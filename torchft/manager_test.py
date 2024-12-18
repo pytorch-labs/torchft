@@ -99,21 +99,21 @@ class TestManager(TestCase):
         )
 
         self.assertEqual(manager._quorum_id, -1)
-        self.assertEqual(manager._step, 0)
+        self.assertEqual(manager.current_step(), 0)
         self.assertEqual(manager.batches_committed(), 0)
 
-        manager.start_step()
+        manager.start_quorum()
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         self.assertEqual(len(manager._pending_work), 1)
         self.assertTrue(manager.should_commit())
         self.assertEqual(len(manager._pending_work), 0)
 
         self.assertEqual(manager._quorum_id, 123)
-        self.assertEqual(manager._step, 1)
+        self.assertEqual(manager.current_step(), 1)
         # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
 
-        manager.start_step()
+        manager.start_quorum()
         self.assertEqual(manager.batches_committed(), 2)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
@@ -133,14 +133,14 @@ class TestManager(TestCase):
             True,  # heal
         )
         # forceable increment checkpoint server to compute correct address
-        manager._ckpt_server.allow_checkpoint(1)
+        manager._ckpt_server.allow_checkpoint(manager.current_step())
 
         client_mock().checkpoint_address.return_value = manager._ckpt_server.address()
 
         self.assertEqual(manager._quorum_id, -1)
-        self.assertEqual(manager._step, 0)
+        self.assertEqual(manager.current_step(), 0)
 
-        manager.start_step()
+        manager.start_quorum()
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         self.assertFalse(manager._healing)
         self.assertTrue(manager.is_participating())
@@ -148,7 +148,7 @@ class TestManager(TestCase):
         self.assertTrue(manager.should_commit())
 
         self.assertEqual(manager._quorum_id, 123)
-        self.assertEqual(manager._step, 20)
+        self.assertEqual(manager.current_step(), 21)
         # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
         # pyre-ignore[16]: _pg is mocked
@@ -175,14 +175,14 @@ class TestManager(TestCase):
             True,  # heal
         )
         # forceable increment checkpoint server to compute correct address
-        manager._ckpt_server.allow_checkpoint(1)
+        manager._ckpt_server.allow_checkpoint(manager.current_step())
 
         client_mock().checkpoint_address.return_value = manager._ckpt_server.address()
 
         self.assertEqual(manager._quorum_id, -1)
-        self.assertEqual(manager._step, 0)
+        self.assertEqual(manager.current_step(), 0)
 
-        manager.start_step()
+        manager.start_quorum()
         assert manager._quorum_future is not None
         manager._quorum_future.result()
         self.assertTrue(manager._healing)
@@ -194,10 +194,10 @@ class TestManager(TestCase):
         torch.testing.assert_close(grad, torch.zeros_like(grad))
         # don't commit since num_max < min_replica_size
         self.assertFalse(manager.should_commit())
-        self.assertFalse(manager._should_step)
+        self.assertEqual(manager.current_step(), 20)
 
         self.assertEqual(manager._quorum_id, 123)
-        self.assertEqual(manager._step, 20)
+        self.assertEqual(manager.current_step(), 20)
         # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
         # pyre-ignore[16]: _pg is mocked
@@ -206,8 +206,8 @@ class TestManager(TestCase):
         self.assertEqual(self.load_state_dict.call_count, 1)
 
         # failed to commit so no step
-        manager.start_step()
-        self.assertEqual(manager._step, 20)
+        manager.start_quorum()
+        self.assertEqual(manager.current_step(), 20)
         self.assertEqual(manager.batches_committed(), 0)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
@@ -227,14 +227,14 @@ class TestManager(TestCase):
             True,  # heal
         )
         # forceable increment checkpoint server to compute correct address
-        manager._ckpt_server.allow_checkpoint(1)
+        manager._ckpt_server.allow_checkpoint(manager.current_step())
 
         client_mock().checkpoint_address.return_value = manager._ckpt_server.address()
 
         self.assertEqual(manager._quorum_id, -1)
-        self.assertEqual(manager._step, 0)
+        self.assertEqual(manager.current_step(), 0)
 
-        manager.start_step()
+        manager.start_quorum()
         assert manager._quorum_future is not None
         manager._quorum_future.result()
         self.assertTrue(manager._healing)
@@ -245,10 +245,9 @@ class TestManager(TestCase):
         # don't commit since num_max < min_replica_size
         self.assertTrue(manager.should_commit())
         self.assertEqual(manager.num_participants(), 1)
-        self.assertTrue(manager._should_step)
+        self.assertTrue(manager.current_step(), 21)
 
         self.assertEqual(manager._quorum_id, 123)
-        self.assertEqual(manager._step, 20)
         # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
         # pyre-ignore[16]: _pg is mocked
@@ -256,8 +255,8 @@ class TestManager(TestCase):
 
         self.assertEqual(self.load_state_dict.call_count, 1)
 
-        manager.start_step()
-        self.assertEqual(manager._step, 21)
+        manager.start_quorum()
+        self.assertEqual(manager.current_step(), 21)
         self.assertEqual(manager.batches_committed(), 1)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
@@ -278,9 +277,9 @@ class TestManager(TestCase):
         )
 
         self.assertEqual(manager._quorum_id, -1)
-        self.assertEqual(manager._step, 0)
+        self.assertEqual(manager.current_step(), 0)
 
-        manager.start_step()
+        manager.start_quorum()
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         # pyre-ignore[16]: _pg is mocked
         self.assertEqual(manager._pg.allreduce.call_count, 1)
@@ -314,7 +313,7 @@ class TestManager(TestCase):
             2,  # max_world_size
             False,  # heal
         )
-        manager.start_step()
+        manager.start_quorum()
 
         self.assertFalse(manager._errored)
 
@@ -343,7 +342,7 @@ class TestManager(TestCase):
             False,  # heal
         )
 
-        manager.start_step()
+        manager.start_quorum()
         manager.allreduce_grad(torch.tensor([1.0])).wait()
         self.assertTrue(manager.should_commit())
 
@@ -372,17 +371,51 @@ class TestManager(TestCase):
             )
 
             self.assertEqual(manager._quorum_id, -1)
-            self.assertEqual(manager._step, 0)
+            self.assertEqual(manager.current_step(), 0)
             self.assertEqual(manager.batches_committed(), 0)
 
-            manager.start_step()
+            manager.start_quorum()
             manager.allreduce_grad(torch.tensor([1.0])).wait()
 
             self.assertEqual(manager.is_participating(), rank != 2)
             self.assertEqual(manager.num_participants(), 2)
 
-            manager.start_step()
+            self.assertTrue(manager.should_commit())
             self.assertEqual(manager.batches_committed(), 2)
+            self.assertEqual(manager.current_step(), 1)
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_quorum_no_healing(self, client_mock: MagicMock) -> None:
+        manager = self._create_manager(
+            min_replica_size=2,
+        )
+        client_mock().should_commit = lambda rank, step, should_commit: should_commit
+
+        client_mock().quorum.return_value = (
+            123,  # quorum_id
+            0,  # replica_rank
+            3,  # replica_world
+            "manager address",
+            f"localhost:{self.store.port}",
+            1,  # max_step
+            None,  # max_rank
+            2,  # max_world_size
+            True,  # heal
+        )
+
+        self.assertEqual(manager._quorum_id, -1)
+        self.assertEqual(manager.current_step(), 0)
+        self.assertEqual(manager.batches_committed(), 0)
+
+        manager.start_quorum(allow_heal=False)
+        manager.allreduce_grad(torch.tensor([1.0])).wait()
+
+        self.assertFalse(manager.is_participating())
+        self.assertEqual(manager.num_participants(), 2)
+
+        self.assertTrue(manager.should_commit())
+        self.assertEqual(manager.batches_committed(), 2)
+        self.assertEqual(manager.current_step(), 1)
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_manager_report_error(self, client_mock: MagicMock) -> None:

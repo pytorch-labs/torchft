@@ -32,7 +32,7 @@ class TestOptim(TestCase):
         optim.load_state_dict(optim.state_dict())
 
         optim.zero_grad()
-        self.assertEqual(manager.start_step.call_count, 1)
+        self.assertEqual(manager.start_quorum.call_count, 1)
 
         manager.should_commit.return_value = True
         optim.step()

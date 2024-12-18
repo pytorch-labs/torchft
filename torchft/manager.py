@@ -182,7 +182,6 @@ class Manager:
         self._batches_committed = 0
 
         # first step is 1
-        self._should_step = True
         self._participating_rank: Optional[int] = None
         self._participating_world_size: int = 0
 
@@ -218,8 +217,7 @@ class Manager:
             fut.set_result(grad)
             return fut
 
-        assert self._quorum_future is not None, "must call step before allreduce_grad"
-        self._quorum_future.result()
+        self.wait_quorum()
 
         if not self.is_participating():
             grad.zero_()
@@ -315,7 +313,7 @@ class Manager:
         self._pending_work.append(cast(torch.futures.Future[object], fut))
         return fut
 
-    def start_step(self) -> None:
+    def start_quorum(self, allow_heal: bool = True) -> None:
         """
         .. note::
             We recommend using the :py:class:`torchft.optim.OptimizerWrapper` instead of calling this directly.
@@ -323,13 +321,20 @@ class Manager:
         Computes a new quorum (potentially asynchronously) and readies the
         manager for a new step.
 
-        Must be called before the forwards pass of each step for best
+        It's best practice to call this before the forwards pass of each step for
         performance as computing quorum may take some time.
+
+        If allow_heal is set, the manager will attempt to heal either
+        synchronously before returning or asynchronously prior to any network
+        calls.
+
+        Args:
+            allow_heal: whether to allow healing at the beginning of the step
         """
 
-        if self._should_step:
-            self._step += 1
-            self._batches_committed += self.num_participants()
+        # wait for previous quorum to complete
+        if self._quorum_future is not None:
+            self._quorum_future.result()
 
         self._errored = None
         self._healing = False
@@ -338,9 +343,9 @@ class Manager:
         # TODO: we should really be wrapping this whole section in a try-except
         # block to allow gracefully recovering from issues in PG setup and quorum.
 
-        self._quorum_future = self._executor.submit(self._async_quorum)
+        self._quorum_future = self._executor.submit(self._async_quorum, allow_heal)
         if not self._use_async_quorum:
-            self._quorum_future.result()
+            self.wait_quorum()
 
             if self._healing:
                 # eagerly apply pending state_dict so we can run the forwards pass
@@ -350,7 +355,18 @@ class Manager:
                 # and don't need to zero_grad
                 self._healing = False
 
-    def _async_quorum(self) -> None:
+    def wait_quorum(self) -> None:
+        """
+        Wait for the quorum to complete.
+
+        ProcessGroup will be in a healthy state after this returns.
+        """
+        assert (
+            self._quorum_future is not None
+        ), "must call start_quorum before wait_quorum"
+        self._quorum_future.result()
+
+    def _async_quorum(self, allow_heal: bool) -> None:
         (
             quorum_id,
             replica_rank,
@@ -372,7 +388,7 @@ class Manager:
         # workers will be healthy.
         self._participating_rank, self._participating_world_size = (
             (max_rank, max_world_size)
-            if self._use_async_quorum
+            if self._use_async_quorum or not allow_heal
             else (replica_rank, replica_world_size)
         )
 
@@ -397,7 +413,7 @@ class Manager:
             self._quorum_id = quorum_id
 
         # See manager.rs for healing conditions
-        if heal:
+        if heal and allow_heal:
             self._healing = True
             self._logger.info(
                 f"healing required, fetching checkpoint server address from {address=} {max_step=}"
@@ -475,7 +491,9 @@ class Manager:
         self._ckpt_server.disallow_checkpoint()
 
         # decide whether we're in a healthy state to increase the step count
-        self._should_step = should_commit
+        if should_commit:
+            self._step += 1
+            self._batches_committed += self.num_participants()
 
         return should_commit
 
