@@ -32,14 +32,14 @@ class TestDDP(TestCase):
         for p in m.parameters():
             self.assertIsNotNone(p.grad)
 
-        self.assertEqual(manager.allreduce_grad.call_count, len(list(m.parameters())))
+        self.assertEqual(manager.allreduce.call_count, len(list(m.parameters())))
 
     def test_ddp(self) -> None:
         manager = create_autospec(Manager)
 
         call_count = 0
 
-        def allreduce_grad(tensor: torch.Tensor) -> Future[torch.Tensor]:
+        def allreduce(tensor: torch.Tensor) -> Future[torch.Tensor]:
             nonlocal call_count
 
             call_count += 1
@@ -48,7 +48,7 @@ class TestDDP(TestCase):
             fut.set_result(tensor)
             return fut
 
-        manager.allreduce_grad = allreduce_grad
+        manager.allreduce = allreduce
 
         m = nn.Linear(3, 4)
         m = DistributedDataParallel(manager, m)

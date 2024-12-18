@@ -194,39 +194,39 @@ class Manager:
             self._manager.shutdown()
         self._executor.shutdown()
 
-    def allreduce_grad(self, grad: torch.Tensor) -> torch.futures.Future[torch.Tensor]:
+    def allreduce(self, tensor: torch.Tensor) -> torch.futures.Future[torch.Tensor]:
         """
-        Allreduce the gradient and return a Future that will be completed when
-        the gradient is ready.
+        Fault tolerant allreduce the tensor and return a Future that will be completed when
+        the tensor is ready.
 
-        This will automatically scale the gradient by 1 / world_size.
+        This will automatically scale the tensor by 1 / world_size.
 
         If an error occurs during the allreduce:
 
         * The Future will be completed with no error and instead tracked asynchronously.
-        * After the first error, all subsequent allreduce_grad calls will be noops and immediately return.
-        * The grad tensor must be zeroed before being used as it may be corrupted.
+        * After the first error, all subsequent calls will be noops and immediately return.
+        * The tensor must be zeroed before being used as it may be corrupted.
 
         Args:
-            grad: the gradient to allreduce
+            tensor: the tensor to allreduce
         Returns:
-            a Future that will be completed with the allreduced gradient
+            a Future that will be completed with the allreduced tensor
         """
         if self.errored():
             fut = torch.futures.Future()  # pyre-fixme[29]: not a function
-            fut.set_result(grad)
+            fut.set_result(tensor)
             return fut
 
         self.wait_quorum()
 
         if not self.is_participating():
-            grad.zero_()
+            tensor.zero_()
 
         # TODO: increase timeout when waiting when healing
         try:
             # Run the allreduce async and save the work object so we can wait on
             # it later.
-            work = self._pg.allreduce([grad], ReduceOp.SUM)
+            work = self._pg.allreduce([tensor], ReduceOp.SUM)
             fut = work.get_future()
 
             # schedule grad normalization as a continuation
@@ -234,17 +234,17 @@ class Manager:
             def callback(
                 fut: torch.futures.Future[List[torch.Tensor]],
             ) -> torch.Tensor:
-                nonlocal grad
+                nonlocal tensor
 
                 # check for exceptions
                 fut.value()
 
-                grad /= self.num_participants()
+                tensor /= self.num_participants()
 
-                return grad
+                return tensor
 
             fut = fut.then(callback)
-            fut = self.wrap_future(fut, grad)
+            fut = self.wrap_future(fut, tensor)
             return fut
 
         except Exception as e:
@@ -254,7 +254,7 @@ class Manager:
             self.report_error(e)
 
             fut = torch.futures.Future()  # pyre-fixme[29]: not a function
-            fut.set_result(grad)
+            fut.set_result(tensor)
             return fut
 
     def report_error(self, e: Exception) -> None:
@@ -324,12 +324,11 @@ class Manager:
         It's best practice to call this before the forwards pass of each step for
         performance as computing quorum may take some time.
 
-        If allow_heal is set, the manager will attempt to heal either
-        synchronously before returning or asynchronously prior to any network
-        calls.
-
         Args:
-            allow_heal: whether to allow healing at the beginning of the step
+            allow_heal: (experimental) whether to allow healing at the beginning of the step
+                If allow_heal is set, the manager will attempt to heal either
+                synchronously before returning or asynchronously prior to any network
+                calls. All replicas must pass the same value to allow_heal.
         """
 
         # wait for previous quorum to complete

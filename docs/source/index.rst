@@ -17,6 +17,7 @@ the entire training job.
     manager
     optim
     ddp
+    local_sgd
     data
     checkpointing
     parameter_server

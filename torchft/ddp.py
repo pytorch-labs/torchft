@@ -68,7 +68,7 @@ class DistributedDataParallel(parallel.DistributedDataParallel):
     def _comm_hook(
         state: "Manager", bucket: dist.GradBucket
     ) -> torch.futures.Future[torch.Tensor]:
-        return state.allreduce_grad(bucket.buffer())
+        return state.allreduce(bucket.buffer())
 
 
 class PureDistributedDataParallel(nn.Module):
@@ -88,7 +88,7 @@ class PureDistributedDataParallel(nn.Module):
 
         def post_grad_hook(p: torch.Tensor) -> None:
             if p.grad is not None:
-                manager.allreduce_grad(p.grad)
+                manager.allreduce(p.grad)
 
         for p in module.parameters():
             p.register_post_accumulate_grad_hook(post_grad_hook)
