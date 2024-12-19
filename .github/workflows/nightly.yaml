@@ -1,0 +1,62 @@
+name: Nightly Push
+
+on:
+  # run every day at 11:15am
+  schedule:
+    - cron:  '15 11 * * *'
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          architecture: x64
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Dependencies
+        run: |
+          set -eux
+
+          pip install -U twine toml
+      - name: Build Docker
+        run: |
+          set -eux
+
+          docker build --progress=plain -t torchft-maturin .
+
+      - name: Set Nightly Version
+        run: |
+          set -eux
+
+          python scripts/patch_nightly_version.py
+
+          cat Cargo.toml
+          cat pyproject.toml
+
+      - name: Build Wheels
+        run: |
+          set -eux
+
+          VERSIONS=(
+            "3.9"
+            "3.10"
+            "3.11"
+            "3.12"
+            "3.13"
+          )
+
+          for version in "${VERSIONS[@]}"; do
+            docker run --rm -v $(pwd):/io -t torchft-maturin build --release --out dist --interpreter "$version"
+          done
+
+      - name: Twine Check
+        run: twine check --strict dist/*
+
+      - name: Upload to Pypi
+        run: twine upload --skip-existing dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.NIGHTLY_PYPI_TOKEN }}
