@@ -11,12 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Setup Python
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           architecture: x64
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Install Dependencies
         run: |
           set -eux
@@ -27,10 +27,10 @@ jobs:
 
           pip install -r docs/requirements.txt
       - name: Build Sphinx Docs
+        working-directory: docs
         run: |
           set -eux
 
-          cd docs
           make html
       - name: Upload static files as artifact
         id: deployment
