@@ -85,6 +85,22 @@ To run the entire suite of tests:
 $ scripts/test.sh
 ```
 
+### Build Docs
+To build the docs run:
+```sh
+pip install -r docs/requirements.txt
+cd docs
+make html
+```
+
+The docs will be built in the `docs/build/html` directory.
+You can serve the docs on your local machine by running:
+```sh
+python3 -m http.server 8001 -d build/html
+```
+
+You can then open the docs in a browser at http://localhost:8001/.
+
 ## Contributor License Agreement ("CLA")
 
 In order to accept your pull request, we need you to submit a CLA. You only need to do this once to work on any of
