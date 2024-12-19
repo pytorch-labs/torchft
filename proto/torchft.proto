@@ -50,7 +50,11 @@ message Quorum {
 }
 
 message LighthouseQuorumRequest {
-    QuorumMember requester = 1;
+    // room_id is the specific quorum channel to use. All workers/replicas
+    // participating in the quorum must specify the same channel.
+    // Multiple channels can be active simultaneously.
+    string room_id = 1;
+    QuorumMember requester = 2;
 }
 
 message LighthouseQuorumResponse {
@@ -69,9 +73,13 @@ service LighthouseService {
 }
 
 message ManagerQuorumRequest {
-    int64 rank = 1;
-    int64 step = 2;
-    string checkpoint_server_addr = 3;
+    // room_id is the specific quorum channel to use. All workers/replicas
+    // participating in the quorum must specify the same channel.
+    // Multiple channels can be active simultaneously.
+    string room_id = 1;
+    int64 rank = 2;
+    int64 step = 3;
+    string checkpoint_server_addr = 4;
 }
 
 message ManagerQuorumResponse {

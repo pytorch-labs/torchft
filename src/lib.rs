@@ -105,12 +105,14 @@ impl ManagerClient {
     fn quorum(
         &mut self,
         py: Python<'_>,
+        room_id: String,
         rank: i64,
         step: i64,
         checkpoint_server_addr: String,
     ) -> PyResult<(i64, i64, i64, String, String, i64, Option<i64>, i64, bool)> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(ManagerQuorumRequest {
+                room_id: room_id,
                 rank: rank,
                 step: step,
                 checkpoint_server_addr: checkpoint_server_addr,

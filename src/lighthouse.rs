@@ -43,12 +43,16 @@ struct QuorumMemberDetails {
     member: QuorumMember,
 }
 
-struct State {
+struct RoomState {
+    room_id: String,
     channel: broadcast::Sender<Quorum>,
     participants: HashMap<String, QuorumMemberDetails>,
     prev_quorum: Option<Quorum>,
     quorum_id: i64,
+}
 
+struct State {
+    rooms: HashMap<String, RoomState>,
     // heartbeat information
     // replica_id -> last heartbeat
     heartbeats: HashMap<String, Instant>,
@@ -85,16 +89,63 @@ fn quorum_changed(a: &Vec<QuorumMember>, b: &Vec<QuorumMember>) -> bool {
     return a_ids != b_ids;
 }
 
+// Checks whether the quorum is valid and an explanation for the state.
+fn quorum_valid(state: &RoomState, opt: &LighthouseOpt) -> (bool, String) {
+    let mut first_joined = Instant::now();
+
+    for details in state.participants.values() {
+        if details.joined < first_joined {
+            first_joined = details.joined;
+        }
+    }
+
+    if state.prev_quorum.is_some() {
+        let mut is_fast_quorum = true;
+        let prev_quorum = state.prev_quorum.as_ref().unwrap();
+
+        for prev_member in prev_quorum.participants.iter() {
+            if !state.participants.contains_key(&prev_member.replica_id) {
+                is_fast_quorum = false;
+            }
+        }
+
+        if is_fast_quorum {
+            return (is_fast_quorum, format!("Fast quorum found!"));
+        }
+    }
+
+    if state.participants.len() < opt.min_replicas as usize {
+        return (
+            false,
+            format!(
+                "No quorum, only have {} participants, need {}",
+                state.participants.len(),
+                opt.min_replicas
+            ),
+        );
+    }
+
+    // Quorum is valid at this point but lets wait for stragglers.
+
+    if Instant::now().duration_since(first_joined) < Duration::from_millis(opt.join_timeout_ms) {
+        return (
+            false,
+            format!(
+                "Valid quorum with {} participants, waiting for stragglers due to join timeout",
+                state.participants.len()
+            ),
+        );
+    }
+
+    (true, format!("Valid quorum found"))
+}
+
 impl Lighthouse {
     pub async fn new(opt: LighthouseOpt) -> Result<Arc<Self>> {
-        let (tx, _) = broadcast::channel(16);
         let listener = tokio::net::TcpListener::bind(&opt.bind).await?;
         Ok(Arc::new(Self {
             state: Mutex::new(State {
-                participants: HashMap::new(),
-                channel: tx,
-                prev_quorum: None,
-                quorum_id: 0,
+                rooms: HashMap::new(),
                 heartbeats: HashMap::new(),
             }),
             opt: opt,
@@ -103,68 +154,11 @@ impl Lighthouse {
         }))
     }
 
-    // Checks whether the quorum is valid and an explanation for the state.
-    async fn quorum_valid(&self) -> (bool, String) {
-        let state = self.state.lock().await;
-
-        let mut first_joined = Instant::now();
-
-        for details in state.participants.values() {
-            if details.joined < first_joined {
-                first_joined = details.joined;
-            }
-        }
-
-        if state.prev_quorum.is_some() {
-            let mut is_fast_quorum = true;
-            let prev_quorum = state.prev_quorum.as_ref().unwrap();
-
-            for prev_member in prev_quorum.participants.iter() {
-                if !state.participants.contains_key(&prev_member.replica_id) {
-                    is_fast_quorum = false;
-                }
-            }
-
-            if is_fast_quorum {
-                return (is_fast_quorum, format!("Fast quorum found!"));
-            }
-        }
-
-        if state.participants.len() < self.opt.min_replicas as usize {
-            return (
-                false,
-                format!(
-                    "No quorum, only have {} participants, need {}",
-                    state.participants.len(),
-                    self.opt.min_replicas
-                ),
-            );
-        }
-
-        // Quorum is valid at this point but lets wait for stragglers.
-
-        if Instant::now().duration_since(first_joined)
-            < Duration::from_millis(self.opt.join_timeout_ms)
-        {
-            return (
-                false,
-                format!(
-                    "Valid quorum with {} participants, waiting for stragglers due to join timeout",
-                    state.participants.len()
-                ),
-            );
-        }
-
-        (true, format!("Valid quorum found"))
-    }
-
-    async fn _quorum_tick(self: Arc<Self>) -> Result<()> {
-        // TODO: these should probably run under the same lock
-        let (quorum_met, reason) = self.quorum_valid().await;
-        info!("{}", reason);
+    fn _quorum_tick(self: Arc<Self>, state: &mut RoomState) -> Result<()> {
+        let (quorum_met, reason) = quorum_valid(state, &self.opt);
+        info!("{}: {}", state.room_id, reason);
 
         if quorum_met {
-            let mut state = self.state.lock().await;
             let mut participants: Vec<QuorumMember> = state
                 .participants
                 .values()
@@ -184,8 +178,8 @@ impl Lighthouse {
             {
                 state.quorum_id += 1;
                 info!(
-                    "Detected quorum change, bumping quorum_id to {}",
-                    state.quorum_id
+                    "{}: Detected quorum change, bumping quorum_id to {}",
+                    state.room_id, state.quorum_id
                 );
             }
 
@@ -195,7 +189,7 @@ impl Lighthouse {
                 created: Some(SystemTime::now().into()),
             };
 
-            info!("Quorum! {:?}", quorum);
+            info!("{}: Quorum! {:?}", state.room_id, quorum);
 
             state.prev_quorum = Some(quorum.clone());
             state.participants.clear();
@@ -209,7 +203,12 @@ impl Lighthouse {
 
     async fn _run_quorum(self: Arc<Self>) -> Result<()> {
         loop {
-            self.clone()._quorum_tick().await?;
+            {
+                let mut state = self.state.lock().await;
+                for (_room_id, room) in &mut state.rooms {
+                    self.clone()._quorum_tick(room)?;
+                }
+            }
 
             sleep(Duration::from_millis(self.opt.quorum_tick_ms)).await;
         }
@@ -277,33 +276,45 @@ impl Lighthouse {
     }
 
     async fn get_status(self: Arc<Self>) -> Html<String> {
-        let (_, quorum_status) = self.quorum_valid().await;
-
         let template = {
             let state = self.state.lock().await;
 
-            let max_step = {
-                if let Some(quorum) = state.prev_quorum.clone() {
-                    quorum
-                        .participants
-                        .iter()
-                        .map(|p| p.step)
-                        .max()
-                        .unwrap_or(-1)
-                } else {
-                    -1
-                }
-            };
+            let rooms = state
+                .rooms
+                .iter()
+                .map(|(room_id, room)| {
+                    let (_, quorum_status) = quorum_valid(&room, &self.opt);
+
+                    let max_step = {
+                        if let Some(quorum) = room.prev_quorum.clone() {
+                            quorum
+                                .participants
+                                .iter()
+                                .map(|p| p.step)
+                                .max()
+                                .unwrap_or(-1)
+                        } else {
+                            -1
+                        }
+                    };
+
+                    RoomStatus {
+                        room_id: room_id.clone(),
+                        quorum_id: room.quorum_id,
+                        prev_quorum: room.prev_quorum.clone(),
+                        quorum_status: quorum_status,
+
+                        max_step: max_step,
+                    }
+                })
+                .collect();
 
             StatusTemplate {
-                quorum_id: state.quorum_id,
-                prev_quorum: state.prev_quorum.clone(),
+                rooms: rooms,
                 heartbeats: state.heartbeats.clone(),
-                quorum_status: quorum_status,
                 old_age_threshold: Instant::now()
                     .checked_sub(Duration::from_secs(1))
                     .unwrap_or(Instant::now()),
-                max_step: max_step,
             }
         };
         Html(template.render().unwrap())
@@ -312,13 +323,16 @@ impl Lighthouse {
     async fn kill(self: Arc<Self>, Path(replica_id): Path<String>) -> Result<(), AppError> {
         let addr = 'addr: {
             let state = self.state.lock().await;
-            if state.prev_quorum.is_none() {
-                return Err(AppError(anyhow!("failed to find replica")));
-            }
 
-            for member in state.prev_quorum.clone().unwrap().participants {
-                if member.replica_id == replica_id {
-                    break 'addr member.address;
+            for (_room_id, room) in &state.rooms {
+                if room.prev_quorum.is_none() {
+                    return Err(AppError(anyhow!("failed to find replica")));
+                }
+
+                for member in room.prev_quorum.clone().unwrap().participants {
+                    if member.replica_id == replica_id {
+                        break 'addr member.address;
+                    }
                 }
             }
             return Err(AppError(anyhow!("failed to find replica")));
@@ -341,8 +355,9 @@ impl LighthouseService for Arc<Lighthouse> {
         &self,
         request: Request<LighthouseQuorumRequest>,
     ) -> Result<Response<LighthouseQuorumResponse>, Status> {
-        let requester = request
-            .into_inner()
+        let req = request.into_inner();
+        let room_id = req.room_id;
+        let requester = req
             .requester
             .ok_or_else(|| return Status::invalid_argument("missing requester"))?;
 
@@ -350,21 +365,40 @@ impl LighthouseService for Arc<Lighthouse> {
 
         let mut rx = {
             let mut state = self.state.lock().await;
-            state.participants.insert(
+
+            if !state.rooms.contains_key(&room_id) {
+                let (tx, _) = broadcast::channel(16);
+
+                state.rooms.insert(
+                    room_id.clone(),
+                    RoomState {
+                        room_id: room_id.clone(),
+                        participants: HashMap::new(),
+                        channel: tx,
+                        prev_quorum: None,
+                        quorum_id: 0,
+                    },
+                );
+            }
+
+            let room = state.rooms.get_mut(&room_id).unwrap();
+
+            room.participants.insert(
                 requester.replica_id.clone(),
                 QuorumMemberDetails {
                     joined: Instant::now(),
                     member: requester,
                 },
             );
-            state.channel.subscribe()
-        };
+            let rx = room.channel.subscribe();
 
-        // proactively run quorum tick
-        self.clone()
-            ._quorum_tick()
-            .await
-            .map_err(|e| Status::from_error(e.into()))?;
+            // proactively run quorum tick
+            self.clone()
+                ._quorum_tick(room)
+                .map_err(|e| Status::from_error(e.into()))?;
+
+            rx
+        };
 
         let quorum = rx.recv().await.map_err(|e| Status::from_error(e.into()))?;
 
@@ -398,13 +432,18 @@ struct IndexTemplate {}
 #[derive(Template)]
 #[template(path = "status.html")]
 struct StatusTemplate {
-    prev_quorum: Option<Quorum>,
-    quorum_id: i64,
+    rooms: Vec<RoomStatus>,
     heartbeats: HashMap<String, Instant>,
-    quorum_status: String,
 
     // visualization thresholds
     old_age_threshold: Instant,
+}
+
+struct RoomStatus {
+    room_id: String,
+    prev_quorum: Option<Quorum>,
+    quorum_id: i64,
+    quorum_status: String,
     max_step: i64,
 }
 
@@ -442,16 +481,6 @@ mod tests {
 
     use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 
-    async fn lighthouse_test_new() -> Result<Arc<Lighthouse>> {
-        let opt = LighthouseOpt {
-            min_replicas: 1,
-            bind: "[::]:0".to_string(),
-            join_timeout_ms: 60 * 60 * 1000, // 1hr
-            quorum_tick_ms: 10,
-        };
-        Lighthouse::new(opt).await
-    }
-
     async fn lighthouse_client_new(addr: String) -> Result<LighthouseServiceClient<Channel>> {
         let conn = Endpoint::new(addr)?
             .connect_timeout(Duration::from_secs(10))
@@ -462,79 +491,95 @@ mod tests {
 
     #[tokio::test]
     async fn test_quorum_join_timeout() -> Result<()> {
-        let lighthouse = lighthouse_test_new().await?;
-        assert!(!lighthouse.quorum_valid().await.0);
+        let opt = LighthouseOpt {
+            min_replicas: 1,
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 60 * 60 * 1000, // 1hr
+            quorum_tick_ms: 10,
+        };
 
-        {
-            let mut state = lighthouse.state.lock().await;
-            state.participants.insert(
-                "a".to_string(),
-                QuorumMemberDetails {
-                    joined: Instant::now(),
-                    member: QuorumMember {
-                        replica_id: "a".to_string(),
-                        address: "".to_string(),
-                        store_address: "".to_string(),
-                        step: 1,
-                        world_size: 1,
-                    },
+        let mut state = RoomState {
+            room_id: "test".to_string(),
+            channel: broadcast::channel(16).0,
+            participants: HashMap::new(),
+            prev_quorum: None,
+            quorum_id: 0,
+        };
+
+        assert!(!quorum_valid(&state, &opt).0);
+
+        state.participants.insert(
+            "a".to_string(),
+            QuorumMemberDetails {
+                joined: Instant::now(),
+                member: QuorumMember {
+                    replica_id: "a".to_string(),
+                    address: "".to_string(),
+                    store_address: "".to_string(),
+                    step: 1,
+                    world_size: 1,
                 },
-            );
-        }
+            },
+        );
 
-        assert!(!lighthouse.quorum_valid().await.0);
+        assert!(!quorum_valid(&state, &opt).0);
 
-        {
-            let mut state = lighthouse.state.lock().await;
-            state.participants.get_mut("a").unwrap().joined =
-                Instant::now().sub(Duration::from_secs(10 * 60 * 60));
-        }
+        state.participants.get_mut("a").unwrap().joined =
+            Instant::now().sub(Duration::from_secs(10 * 60 * 60));
 
-        assert!(lighthouse.quorum_valid().await.0);
+        assert!(quorum_valid(&state, &opt).0);
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_quorum_fast_prev_quorum() -> Result<()> {
-        let lighthouse = lighthouse_test_new().await?;
-        assert!(!lighthouse.quorum_valid().await.0);
+        let opt = LighthouseOpt {
+            min_replicas: 1,
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 60 * 60 * 1000, // 1hr
+            quorum_tick_ms: 10,
+        };
 
-        {
-            let mut state = lighthouse.state.lock().await;
-            state.participants.insert(
-                "a".to_string(),
-                QuorumMemberDetails {
-                    joined: Instant::now(),
-                    member: QuorumMember {
-                        replica_id: "a".to_string(),
-                        address: "".to_string(),
-                        store_address: "".to_string(),
-                        step: 1,
-                        world_size: 1,
-                    },
-                },
-            );
-        }
+        let mut state = RoomState {
+            room_id: "test".to_string(),
+            channel: broadcast::channel(16).0,
+            participants: HashMap::new(),
+            prev_quorum: None,
+            quorum_id: 0,
+        };
 
-        assert!(!lighthouse.quorum_valid().await.0);
+        assert!(!quorum_valid(&state, &opt).0);
 
-        {
-            let mut state = lighthouse.state.lock().await;
-            state.prev_quorum = Some(Quorum {
-                quorum_id: 1,
-                participants: vec![QuorumMember {
+        state.participants.insert(
+            "a".to_string(),
+            QuorumMemberDetails {
+                joined: Instant::now(),
+                member: QuorumMember {
                     replica_id: "a".to_string(),
                     address: "".to_string(),
                     store_address: "".to_string(),
                     step: 1,
                     world_size: 1,
-                }],
-                created: Some(SystemTime::now().into()),
-            });
-        }
+                },
+            },
+        );
 
-        assert!(lighthouse.quorum_valid().await.0);
+        assert!(!quorum_valid(&state, &opt).0);
+
+        state.prev_quorum = Some(Quorum {
+            quorum_id: 1,
+            participants: vec![QuorumMember {
+                replica_id: "a".to_string(),
+                address: "".to_string(),
+                store_address: "".to_string(),
+                step: 1,
+                world_size: 1,
+            }],
+            created: Some(SystemTime::now().into()),
+        });
+
+        assert!(quorum_valid(&state, &opt).0);
 
         Ok(())
     }
@@ -563,6 +608,7 @@ mod tests {
 
         {
             let request = tonic::Request::new(LighthouseQuorumRequest {
+                room_id: "test".to_string(),
                 requester: Some(QuorumMember {
                     replica_id: "foo".to_string(),
                     address: "".to_string(),

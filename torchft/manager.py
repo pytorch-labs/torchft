@@ -313,7 +313,7 @@ class Manager:
         self._pending_work.append(cast(torch.futures.Future[object], fut))
         return fut
 
-    def start_quorum(self, allow_heal: bool = True) -> None:
+    def start_quorum(self, room_id: str = "default", allow_heal: bool = True) -> None:
         """
         .. note::
             We recommend using the :py:class:`torchft.optim.OptimizerWrapper` instead of calling this directly.
@@ -329,6 +329,8 @@ class Manager:
                 If allow_heal is set, the manager will attempt to heal either
                 synchronously before returning or asynchronously prior to any network
                 calls. All replicas must pass the same value to allow_heal.
+            room_id: (experimental) the room id to use for quorum, this allows
+                for multiple quorums to be used within the same job.
         """
 
         # wait for previous quorum to complete
@@ -342,7 +344,9 @@ class Manager:
         # TODO: we should really be wrapping this whole section in a try-except
         # block to allow gracefully recovering from issues in PG setup and quorum.
 
-        self._quorum_future = self._executor.submit(self._async_quorum, allow_heal)
+        self._quorum_future = self._executor.submit(
+            self._async_quorum, room_id=room_id, allow_heal=allow_heal
+        )
         if not self._use_async_quorum:
             self.wait_quorum()
 
@@ -365,7 +369,7 @@ class Manager:
         ), "must call start_quorum before wait_quorum"
         self._quorum_future.result()
 
-    def _async_quorum(self, allow_heal: bool) -> None:
+    def _async_quorum(self, room_id: str, allow_heal: bool) -> None:
         (
             quorum_id,
             replica_rank,
@@ -377,6 +381,7 @@ class Manager:
             max_world_size,
             heal,
         ) = self._client.quorum(
+            room_id=room_id,
             rank=self._rank,
             step=self._step,
             checkpoint_server_addr=self._ckpt_server.address(),
