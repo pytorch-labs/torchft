@@ -6,3 +6,4 @@ papermill
 ipykernel
 ipython_genutils
 jinja2==3.1.4
+sphinx-autobuild

@@ -90,16 +90,11 @@ To build the docs run:
 ```sh
 pip install -r docs/requirements.txt
 cd docs
-make html
+make livehtml
 ```
 
-The docs will be built in the `docs/build/html` directory.
-You can serve the docs on your local machine by running:
-```sh
-python3 -m http.server 8001 -d build/html
-```
-
-You can then open the docs in a browser at http://localhost:8001/.
+The docs will be built in the `docs/build/html` directory and served at http://localhost:8000.
+The page will be automatically re-built as long as the process is kept running.
 
 ## Contributor License Agreement ("CLA")
 
