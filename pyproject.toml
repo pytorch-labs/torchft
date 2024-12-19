@@ -15,6 +15,11 @@ dependencies = [
     "torch"
 ]
 
+[project.urls]
+Documentation = "https://pytorch-labs.github.io/torchft"
+Repository = "https://github.com/pytorch-labs/torchft"
+Issues = "https://github.com/pytorch-labs/torchft/issues"
+
 [project.optional-dependencies]
 dev = [
     "pytest",
