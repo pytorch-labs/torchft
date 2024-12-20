@@ -1,8 +1,10 @@
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import ExitStack, nullcontext
-from typing import Dict, List, Set, Tuple
+from contextlib import ExitStack
+from dataclasses import dataclass, field
+from os import sync
+from typing import Callable, Dict, List, Protocol, Set, Tuple
 from unittest import TestCase
 
 import torch
@@ -13,6 +15,7 @@ from parameterized import parameterized
 from torch import nn, optim
 
 from torchft.ddp import DistributedDataParallel
+from torchft.local_sgd import LocalSGD
 from torchft.manager import Manager
 from torchft.optim import OptimizerWrapper
 from torchft.process_group import ProcessGroupGloo
@@ -58,84 +61,74 @@ class FailureInjector:
                 raise InjectedFailure(f"injected failure {rank=} {step=}")
 
 
-def replica_main(
-    replica_id: int,
-    lighthouse_address: str,
-    failure_injector: FailureInjector,
-    world_size: int,
-    manager_args: Dict[str, object],
-) -> List[Dict[str, Dict[str, object]]]:
-    store = dist.TCPStore(
-        host_name="localhost",
-        port=0,
-        is_master=True,
-        wait_for_workers=False,
-    )
+class TrainLoop(Protocol):
+    def __call__(
+        self, rank: int, store_port: int, runner: "Runner"
+    ) -> Dict[str, Dict[str, object]]: ...
 
-    with ThreadPoolExecutor(
-        max_workers=world_size, thread_name_prefix=f"replica{replica_id}"
-    ) as executor:
-        futures = []
-        for rank in range(world_size):
-            futures.append(
-                executor.submit(
-                    train_loop,
-                    replica_id,
-                    lighthouse_address,
-                    failure_injector=failure_injector,
-                    rank=rank,
-                    world_size=world_size,
-                    store_port=store.port,
-                    manager_args=manager_args,
+
+@dataclass
+class Runner:
+    replica_id: int
+    lighthouse_address: str
+    failure_injector: FailureInjector
+    train_loop: TrainLoop
+
+    world_size: int = 1
+    attempts: int = 3
+    manager_args: Dict[str, object] = field(default_factory=dict)
+
+    def _replica_main(self) -> List[Dict[str, Dict[str, object]]]:
+        store = dist.TCPStore(
+            host_name="localhost",
+            port=0,
+            is_master=True,
+            wait_for_workers=False,
+        )
+
+        with ThreadPoolExecutor(
+            max_workers=self.world_size, thread_name_prefix=f"replica{self.replica_id}"
+        ) as executor:
+            futures = []
+            for rank in range(self.world_size):
+                futures.append(
+                    executor.submit(
+                        self.train_loop,
+                        rank=rank,
+                        store_port=store.port,
+                        runner=self,
+                    )
                 )
-            )
 
-        for fut in as_completed(futures):
+            for fut in as_completed(futures):
+                try:
+                    fut.result()
+                except Exception as e:
+                    logger.exception(f"worker threw exception: {e}")
+                    raise
+
+            return [fut.result() for fut in futures]
+
+    def run_replica(self) -> List[Dict[str, Dict[str, object]]]:
+        for i in range(self.attempts):
             try:
-                fut.result()
-            except Exception as e:
-                logger.exception(f"worker threw exception: {e}")
-                raise
+                print(
+                    f"starting replica group {self.replica_id=} {self.world_size=} attempt {i}"
+                )
+                return self._replica_main()
+            except InjectedFailure as e:
+                print("got injected failure", i, e)
+                if i == self.attempts - 1:
+                    raise
+                continue
 
-        return [fut.result() for fut in futures]
-
-
-def worker_manager(
-    replica_id: int,
-    lighthouse_address: str,
-    failure_injector: FailureInjector,
-    manager_args: Dict[str, object],
-    attempts: int = 3,
-    world_size: int = 1,
-) -> List[Dict[str, Dict[str, object]]]:
-
-    for i in range(attempts):
-        try:
-            print(f"starting replica group {replica_id=} {world_size=} attempt {i}")
-            return replica_main(
-                replica_id,
-                lighthouse_address,
-                failure_injector=failure_injector,
-                world_size=world_size,
-                manager_args=manager_args,
-            )
-        except InjectedFailure as e:
-            print("got injected failure", i, e)
-            if i == attempts - 1:
-                raise
-            continue
-
-    raise RuntimeError("ran out of attempts")
+        raise RuntimeError("ran out of attempts")
 
 
-def train_loop(
-    replica_id: int,
-    lighthouse_address: str,
-    failure_injector: FailureInjector,
+def ddp_train_loop(
     rank: int,
-    world_size: int,
     store_port: int,
-    manager_args: Dict[str, object],
+    runner: Runner,
 ) -> Dict[str, Dict[str, object]]:
     with ExitStack() as stack:
 
@@ -149,7 +142,7 @@ def train_loop(
                 "optim": optimizer.state_dict(),
             }
 
-        print(f"worker {replica_id=} {rank=} {world_size=} starting")
+        print(f"worker {runner.replica_id=} {rank=} {runner.world_size=} starting")
 
         pg = ProcessGroupGloo()
         manager = Manager(
@@ -157,15 +150,15 @@ def train_loop(
             min_replica_size=2,
             load_state_dict=load_state_dict,
             state_dict=state_dict,
-            replica_id=str(replica_id),
+            replica_id=str(runner.replica_id),
             store_addr="localhost",
             store_port=store_port,
             rank=rank,
-            world_size=world_size,
-            lighthouse_addr=lighthouse_address,
-            port=19530 + replica_id,
+            world_size=runner.world_size,
+            lighthouse_addr=runner.lighthouse_address,
+            port=19530 + runner.replica_id,
             # pyre-fixme[6]: Incompatible parameter type
-            **manager_args,
+            **runner.manager_args,
         )
         stack.callback(manager.shutdown)
 
@@ -190,7 +183,70 @@ def train_loop(
             if manager.current_step() >= 4:
                 break
 
-            failure_injector.check(rank, manager.current_step())
+            runner.failure_injector.check(rank, manager.current_step())
+
+        # return state_dict so we can check consistency
+        return state_dict()
+
+
+def local_sgd_train_loop(
+    rank: int,
+    store_port: int,
+    runner: Runner,
+) -> Dict[str, Dict[str, object]]:
+    with ExitStack() as stack:
+
+        def load_state_dict(state_dict: Dict[str, Dict[str, object]]) -> None:
+            m.load_state_dict(state_dict["model"])
+            optimizer.load_state_dict(state_dict["optim"])
+
+        def state_dict() -> Dict[str, Dict[str, object]]:
+            return {
+                "model": m.state_dict(),
+                "optim": optimizer.state_dict(),
+            }
+
+        print(f"worker {runner.replica_id=} {rank=} {runner.world_size=} starting")
+
+        pg = ProcessGroupGloo()
+        manager = Manager(
+            pg=pg,
+            min_replica_size=2,
+            load_state_dict=load_state_dict,
+            state_dict=state_dict,
+            replica_id=str(runner.replica_id),
+            store_addr="localhost",
+            store_port=store_port,
+            rank=rank,
+            world_size=runner.world_size,
+            lighthouse_addr=runner.lighthouse_address,
+            port=19530 + runner.replica_id,
+            # pyre-fixme[6]: Incompatible parameter type
+            **runner.manager_args,
+        )
+        stack.callback(manager.shutdown)
+
+        m: nn.Module = MyModel()
+        optimizer: optim.Optimizer = optim.Adam(m.parameters())
+        m = LocalSGD(manager, m, optimizer, sync_every=2)
+        criterion = nn.CrossEntropyLoss()
+
+        while True:
+            inputs = torch.rand(2, 3)
+            labels = torch.randint(4, (2,))
+
+            optimizer.zero_grad()
+            out = m(inputs)
+            loss = criterion(out, labels)
+
+            loss.backward()
+
+            optimizer.step()
+
+            if manager.current_step() >= 4:
+                break
+
+            runner.failure_injector.check(rank, manager.current_step())
 
         # return state_dict so we can check consistency
         return state_dict()
@@ -208,15 +264,13 @@ class ManagerIntegTest(TestCase):
         with ThreadPoolExecutor(max_workers=num_replicas) as executor:
             for replica_id in range(num_replicas):
                 failure_injector = FailureInjector()
-                futures.append(
-                    executor.submit(
-                        worker_manager,
-                        replica_id,
-                        lighthouse.address(),
-                        failure_injector=failure_injector,
-                        manager_args={},
-                    )
+                runner = Runner(
+                    replica_id=replica_id,
+                    lighthouse_address=lighthouse.address(),
+                    failure_injector=failure_injector,
+                    train_loop=ddp_train_loop,
                 )
+                futures.append(executor.submit(runner.run_replica))
 
         state_dicts = []
 
@@ -258,17 +312,16 @@ class ManagerIntegTest(TestCase):
             for replica_id, failure_injector in zip(
                 range(num_replicas), failure_injectors
             ):
-                futures.append(
-                    executor.submit(
-                        worker_manager,
-                        replica_id,
-                        lighthouse.address(),
-                        failure_injector=failure_injector,
-                        manager_args={
-                            "use_async_quorum": use_async_quorum,
-                        },
-                    )
+                runner = Runner(
+                    replica_id=replica_id,
+                    lighthouse_address=lighthouse.address(),
+                    failure_injector=failure_injector,
+                    manager_args={
+                        "use_async_quorum": use_async_quorum,
+                    },
+                    train_loop=ddp_train_loop,
                 )
+                futures.append(executor.submit(runner.run_replica))
 
             state_dicts = []
 
@@ -300,16 +353,14 @@ class ManagerIntegTest(TestCase):
             for replica_id, failure_injector in zip(
                 range(num_replicas), failure_injectors
             ):
-                futures.append(
-                    executor.submit(
-                        worker_manager,
-                        replica_id,
-                        lighthouse.address(),
-                        failure_injector=failure_injector,
-                        world_size=world_size,
-                        manager_args={},
-                    )
+                runner = Runner(
+                    replica_id=replica_id,
+                    lighthouse_address=lighthouse.address(),
+                    failure_injector=failure_injector,
+                    world_size=world_size,
+                    train_loop=ddp_train_loop,
                 )
+                futures.append(executor.submit(runner.run_replica))
 
             state_dicts = []
 
@@ -324,3 +375,51 @@ class ManagerIntegTest(TestCase):
 
         for state_dict in state_dicts:
             torch.testing.assert_close(state_dict, state_dicts[0])
+
+    def test_local_sgd_recovery(self) -> None:
+        lighthouse = Lighthouse(
+            bind="[::]:0",
+            min_replicas=2,
+        )
+        num_replicas = 2
+        futures = []
+
+        failure_injectors = [
+            FailureInjector(),
+            FailureInjector().fail_at(0, 2),
+        ]
+
+        with ThreadPoolExecutor(max_workers=num_replicas) as executor:
+            for replica_id, failure_injector in zip(
+                range(num_replicas), failure_injectors
+            ):
+                runner = Runner(
+                    replica_id=replica_id,
+                    lighthouse_address=lighthouse.address(),
+                    failure_injector=failure_injector,
+                    train_loop=local_sgd_train_loop,
+                    manager_args={
+                        "use_async_quorum": False,
+                    },
+                )
+                futures.append(executor.submit(runner.run_replica))
+
+            state_dicts = []
+
+            for fut in as_completed(futures):
+                try:
+                    state_dicts.append(fut.result())
+                except Exception as e:
+                    print(e)
+                    raise
+
+        lighthouse.shutdown()
+
+        for state_dict in state_dicts:
+            # LocalSGD only guarantees that the model is consistent across
+            # replicas but uses separate optimizer states.
+            torch.testing.assert_close(
+                state_dict[0]["model"], state_dicts[0][0]["model"]
+            )
+
+        self.assertEqual(failure_injectors[1].count, 1)

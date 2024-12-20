@@ -178,7 +178,7 @@ class LocalSGD(nn.Module):
 
         for p in self._model.parameters():
             # TODO: bucketize parameters
-            works.append(self._manager.allreduce(p))
+            works.append(self._manager.allreduce(p.data.detach()))
 
         for work in works:
             work.wait()
