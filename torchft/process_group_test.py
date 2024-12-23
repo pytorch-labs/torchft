@@ -14,18 +14,18 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch._C._distributed_c10d import (
+    _resolve_process_group,
     AllgatherOptions,
     AllreduceOptions,
     BroadcastOptions,
     ReduceOp,
-    _resolve_process_group,
 )
 from torch.distributed import (
+    _functional_collectives,
+    get_world_size,
     ReduceOp,
     TCPStore,
     Work,
-    _functional_collectives,
-    get_world_size,
 )
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import MultiProcessTestCase
@@ -34,6 +34,7 @@ from torchft.manager import Manager
 from torchft.process_group import (
     _DummyWork,
     _ErrorSwallowingWork,
+    _ManagedWork,
     ErrorSwallowingProcessGroupWrapper,
     extend_device_mesh,
     ft_init_device_mesh,
@@ -46,10 +47,6 @@ from torchft.process_group import (
     ProcessGroupGloo,
     ProcessGroupNCCL,
     ProcessGroupWrapper,
-    _DummyWork,
-    _ErrorSwallowingWork,
-    _ManagedWork,
-    extend_device_mesh,
 )
 
 
@@ -319,7 +316,6 @@ class DevideMeshTest(MultiProcessTestCase):
         self._spawn_processes()
 
     def test_init_device_mesh(self) -> None:
-        os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = str(12346)
         os.environ["RANK"] = str(self.rank)
         os.environ["WORLD_SIZE"] = str(4)
