@@ -106,6 +106,7 @@ fn quorum_valid(state: &RoomState, opt: &LighthouseOpt) -> (bool, String) {
         for prev_member in prev_quorum.participants.iter() {
             if !state.participants.contains_key(&prev_member.replica_id) {
                 is_fast_quorum = false;
+                break;
             }
         }
 

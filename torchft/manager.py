@@ -274,7 +274,7 @@ class Manager:
         Get whether an error has occurred.
 
         Returns:
-            The error or None if no error has occured.
+            The error or None if no error has occurred.
         """
         return self._errored
 

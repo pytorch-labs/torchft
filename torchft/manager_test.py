@@ -132,7 +132,7 @@ class TestManager(TestCase):
             2,  # max_world_size
             True,  # heal
         )
-        # forceable increment checkpoint server to compute correct address
+        # forcible increment checkpoint server to compute correct address
         manager._ckpt_server.allow_checkpoint(manager.current_step())
 
         client_mock().checkpoint_address.return_value = manager._ckpt_server.address()
@@ -174,7 +174,7 @@ class TestManager(TestCase):
             1,  # max_world_size
             True,  # heal
         )
-        # forceable increment checkpoint server to compute correct address
+        # forcible increment checkpoint server to compute correct address
         manager._ckpt_server.allow_checkpoint(manager.current_step())
 
         client_mock().checkpoint_address.return_value = manager._ckpt_server.address()
