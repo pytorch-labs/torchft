@@ -807,18 +807,18 @@ def extend_device_mesh(
     )
 
 
-class _ManagedDeviceMesh(DeviceMesh):
+class ManagedDeviceMesh(DeviceMesh):
     def __init__(
         self,
         mesh: Optional[DeviceMesh],
-        mesh_dim_names: Tuple[str],
+        mesh_dim_names: Tuple[str, ...],
         replicate_pg: ManagedProcessGroup,
         replicate_dim: int,
-        parent: Optional["_ManagedDeviceMesh"],
-    ):
+        parent: Optional["ManagedDeviceMesh"],
+    ) -> None:
         if mesh is None and parent is not None:
             raise ValueError(
-                "_ManagedDeviceMesh doesn't support both mesh and parent are None."
+                "ManagedDeviceMesh doesn't support both mesh and parent are None."
             )
         self.mesh = mesh
         self.mesh_dim_names = mesh_dim_names
@@ -834,7 +834,7 @@ class _ManagedDeviceMesh(DeviceMesh):
     def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
         if isinstance(mesh_dim_names, str):
             if mesh_dim_names == self.replicate_dim_name:
-                return _ManagedDeviceMesh(
+                return ManagedDeviceMesh(
                     mesh=None,
                     mesh_dim_names=(mesh_dim_names,),
                     replicate_pg=self.replicate_pg,
@@ -850,11 +850,11 @@ class _ManagedDeviceMesh(DeviceMesh):
             if self.replicate_dim_name in mesh_dim_names:
                 return self.mesh[mesh_dim_names]
             else:
-                return _ManagedDeviceMesh(
+                return ManagedDeviceMesh(
                     self.mesh[mesh_dim_names],
                     mesh_dim_names,
                     self.replicate_pg,
-                    mesh_dim_name.index(self.replicate_dim_name),
+                    mesh_dim_names.index(self.replicate_dim_name),
                     parent=self,
                 )
 
@@ -868,7 +868,8 @@ class _ManagedDeviceMesh(DeviceMesh):
         elif mesh_dim == self.replicate_dim_name:
             return self.replicate_pg
         else:
-            return self.mesh.get_group(self._real_mesh_dim(mesh_dim))
+            dim = self.mesh_dim_names.index(mesh_dim)
+            return self.mesh.get_group(self._real_mesh_dim(dim))
 
     def _flatten(self, mesh_dim_name: str) -> "DeviceMesh":
         flatten_mesh = _FlattenDeviceMesh(self)
@@ -897,11 +898,17 @@ class _ManagedDeviceMesh(DeviceMesh):
     def shape(self) -> Tuple[int, ...]:
         ret = list(self.mesh.shape)
         ret.insert(self.replicate_dim, self.replicate_pg.size())
+        return ret
 
     def get_rank(self) -> int:
         return self.mesh.get_rank()
 
     def get_local_rank(self, mesh_dim: Optional[Union[int, str]] = None) -> int:
+        if isinstance(mesh_dim, str):
+            dim = self.mesh_dim_names.index(mesh_dim)
+        else:
+            dim = 0 if mesh_dim is None else int(mesh_dim)
+
         if mesh_dim is None:
             if self.mesh is None:
                 return get_rank(self.replicate_pg)
@@ -911,10 +918,10 @@ class _ManagedDeviceMesh(DeviceMesh):
             other_dim_rank = self.mesh.get_local_rank()
             replicate_pg_rank = get_rank(self.replicate_pg)
             return other_dim_size * replicate_pg_rank + other_dim_rank
-        elif mesh_dim in (self.replicate_dim, self.replicate_dim_name):
+        elif dim == self.replicate_dim:
             return get_rank(self.replicate_pg)
         else:
-            return self.mesh.get_local_rank(self._real_mesh_dim(mesh_dim))
+            return self.mesh.get_local_rank(self._real_mesh_dim(dim))
 
     def get_coordinate(self) -> Optional[List[int]]:
         """
@@ -928,7 +935,7 @@ class _ManagedDeviceMesh(DeviceMesh):
 
 
 class _FlattenDeviceMesh(DeviceMesh):
-    def __init__(self, managed_mesh: _ManagedDeviceMesh):
+    def __init__(self, managed_mesh: ManagedDeviceMesh) -> None:
         self.managed_mesh = managed_mesh
 
     def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
@@ -970,7 +977,7 @@ def ft_init_device_mesh(
     mesh_dim_names: Tuple[str, ...],
     replicate_dim: int,
     manager: "Manager",
-):
+) -> "ManagedDeviceMesh":
     # We need to mislead DeviceMesh into thinking that replicate_dim has only
     # 1 rank.
     _mesh_shape = list(mesh_shape)
@@ -996,7 +1003,7 @@ def ft_init_device_mesh(
     # the same backend has been registered.
     replicate_pg.register(mesh_dim_names[replicate_dim])
 
-    return _ManagedDeviceMesh(
+    return ManagedDeviceMesh(
         mesh=mesh,
         mesh_dim_names=mesh_dim_names,
         replicate_pg=replicate_pg,

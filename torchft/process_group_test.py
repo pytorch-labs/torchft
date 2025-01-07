@@ -304,18 +304,19 @@ class ProcessGroupTest(TestCase):
         self.assertEqual(manager.wrap_future.call_count, 1)
 
 
-class DevideMeshTest(MultiProcessTestCase):
+class DeviceMeshTest(MultiProcessTestCase):
     @property
-    def world_size(self):
+    def world_size(self) -> int:
         return 4
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         os.environ["TORCH_NCCL_DESYNC_DEBUG"] = "0"
         self._spawn_processes()
 
     def test_init_device_mesh(self) -> None:
         os.environ["MASTER_PORT"] = str(12346)
+        # pyre-ignore[16]
         os.environ["RANK"] = str(self.rank)
         os.environ["WORLD_SIZE"] = str(4)
 
@@ -331,6 +332,7 @@ class DevideMeshTest(MultiProcessTestCase):
             manager=manager,
         )
 
+        # pyre-ignore[16]
         self.assertTrue(
             isinstance(device_mesh.get_group("dp_replicate"), ManagedProcessGroup)
         )
@@ -338,6 +340,7 @@ class DevideMeshTest(MultiProcessTestCase):
             not isinstance(device_mesh.get_group("dp_shard"), ManagedProcessGroup)
         )
         replicate_group = device_mesh.get_group("dp_replicate")
+        # pyre-ignore[16]
         self.assertEqual(replicate_group._manager, manager)
         replicate_mesh = device_mesh["dp_replicate"]
         self.assertEqual(replicate_mesh.get_group(), replicate_group)

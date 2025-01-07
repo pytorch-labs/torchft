@@ -37,17 +37,19 @@ from torchft.process_group import ManagedProcessGroup, ft_init_device_mesh
 
 class FSDPTest(MultiProcessTestCase):
     @property
-    def world_size(self):
+    def world_size(self) -> int:
         return 4
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         os.environ["TORCH_NCCL_DESYNC_DEBUG"] = "0"
         self._spawn_processes()
 
     def test_fsdp(self) -> None:
         group_size = self.world_size // 2
+        # pyre-ignore[16]
         group = self.rank // group_size
+        # pyre-ignore[16]
         group_rank = self.rank % group_size
 
         os.environ["MASTER_ADDR"] = "127.0.0.1"
