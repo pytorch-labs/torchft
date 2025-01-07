@@ -49,7 +49,6 @@ class FSDPTest(MultiProcessTestCase):
         group_size = self.world_size // 2
         # pyre-ignore[16]
         group = self.rank // group_size
-        # pyre-ignore[16]
         group_rank = self.rank % group_size
 
         os.environ["MASTER_ADDR"] = "127.0.0.1"

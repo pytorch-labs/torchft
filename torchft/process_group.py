@@ -824,12 +824,14 @@ class ManagedDeviceMesh(DeviceMesh):
         self.mesh_dim_names = mesh_dim_names
         self.replicate_pg = replicate_pg
         self.replicate_dim = replicate_dim
-        self.replicate_dim_name = mesh_dim_names[replicate_dim]
+        self.replicate_dim_name: str = mesh_dim_names[replicate_dim]
         self.parent = parent
-        self.flatten_meshes = {}
-        self.device_type = mesh.device_type if mesh is not None else parent.device_type
-        self._flatten_mesh_list = tuple()
-        self._thread_id = None
+        self.flatten_meshes: Dict[str, DeviceMesh] = {}
+        self.device_type: str = (
+            mesh.device_type if mesh is not None else parent.device_type
+        )
+        self._flatten_mesh_list: Tuple[DeviceMesh, ...] = tuple()
+        self._thread_id: Optional[int] = None
 
     def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
         if isinstance(mesh_dim_names, str):
@@ -844,6 +846,7 @@ class ManagedDeviceMesh(DeviceMesh):
             elif mesh_dim_names in self.flatten_meshes:
                 return self.flatten_meshes[mesh_dim_names]
             else:
+                assert self.mesh is not None
                 return self.mesh[mesh_dim_names]
         else:
             assert isinstance(mesh_dim_names, tuple)
@@ -861,14 +864,18 @@ class ManagedDeviceMesh(DeviceMesh):
     def _real_mesh_dim(self, mesh_dim: int) -> int:
         return mesh_dim - 1 if mesh_dim > self.replicate_dim else mesh_dim
 
-    def get_group(self, mesh_dim: Optional[str] = None) -> BaseProcessGroup:
+    def get_group(self, mesh_dim: Optional[Union[int, str]] = None) -> BaseProcessGroup:
+        if isinstance(mesh_dim, str):
+            dim = self.mesh_dim_names.index(mesh_dim)
+        else:
+            dim = 0 if mesh_dim is None else int(mesh_dim)
+
         if mesh_dim is None:
             assert self.mesh is None
             return self.replicate_pg
-        elif mesh_dim == self.replicate_dim_name:
+        elif dim == self.replicate_dim:
             return self.replicate_pg
         else:
-            dim = self.mesh_dim_names.index(mesh_dim)
             return self.mesh.get_group(self._real_mesh_dim(dim))
 
     def _flatten(self, mesh_dim_name: str) -> "DeviceMesh":
@@ -892,6 +899,7 @@ class ManagedDeviceMesh(DeviceMesh):
 
     @property
     def ndim(self) -> int:
+        assert self.mesh is not None
         return self.mesh.ndim + 1
 
     @property
@@ -901,6 +909,7 @@ class ManagedDeviceMesh(DeviceMesh):
         return ret
 
     def get_rank(self) -> int:
+        assert self.mesh is not None
         return self.mesh.get_rank()
 
     def get_local_rank(self, mesh_dim: Optional[Union[int, str]] = None) -> int:
@@ -915,12 +924,14 @@ class ManagedDeviceMesh(DeviceMesh):
 
             assert self.replicate_dim == 0, "replicate_dim must be the first one"
             other_dim_size = self.mesh.size()
+            assert self.mesh is not None
             other_dim_rank = self.mesh.get_local_rank()
             replicate_pg_rank = get_rank(self.replicate_pg)
             return other_dim_size * replicate_pg_rank + other_dim_rank
         elif dim == self.replicate_dim:
             return get_rank(self.replicate_pg)
         else:
+            assert self.mesh is not None
             return self.mesh.get_local_rank(self._real_mesh_dim(dim))
 
     def get_coordinate(self) -> Optional[List[int]]:
@@ -928,9 +939,10 @@ class ManagedDeviceMesh(DeviceMesh):
         Return the relative indices of this rank relative to all
         dimensions of the mesh. If this rank is not part of the mesh, return None.
         """
+        assert self.mesh is not None
         return self.mesh._coordinate_on_dim if self.mesh._coordinate_on_dim else None
 
-    def get_all_groups(self) -> List[ProcessGroup]:
+    def get_all_groups(self) -> List[BaseProcessGroup]:
         raise NotImplementedError
 
 
@@ -941,10 +953,10 @@ class _FlattenDeviceMesh(DeviceMesh):
     def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
         raise NotImplementedError
 
-    def get_group(self, mesh_dim: Optional[str] = None) -> BaseProcessGroup:
+    def get_group(self, mesh_dim: Optional[Union[int, str]] = None) -> BaseProcessGroup:
         raise NotImplementedError
 
-    def _flatten(self, mesh_dim_name: str) -> "DeviceMesh":
+    def _flatten(self, mesh_dim_name: Optional[str]) -> "DeviceMesh":
         raise NotImplementedError
 
     def size(self, mesh_dim: Optional[int] = None) -> int:
@@ -966,7 +978,7 @@ class _FlattenDeviceMesh(DeviceMesh):
         assert mesh_dim is None
         return self.managed_mesh.get_local_rank()
 
-    def get_all_groups(self) -> List[ProcessGroup]:
+    def get_all_groups(self) -> List[BaseProcessGroup]:
         raise NotImplementedError
 
 
