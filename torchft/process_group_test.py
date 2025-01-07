@@ -325,7 +325,7 @@ class DevideMeshTest(MultiProcessTestCase):
         # real mesh but is virtually added to the mesh via ManagedDeviceMesh.
         device_mesh = ft_init_device_mesh(
             device_type="cpu",
-            mesh_shape=(2, 4),
+            mesh_shape=(2, self.world_size),
             mesh_dim_names=("dp_replicate", "dp_shard"),
             replicate_dim=0,
             manager=manager,
@@ -343,5 +343,5 @@ class DevideMeshTest(MultiProcessTestCase):
         self.assertEqual(replicate_mesh.get_group(), replicate_group)
         flatten_mesh = device_mesh._flatten("dp")
         manager.num_participants.return_value = 1
-        self.assertEqual(flatten_mesh.size(), 4)
+        self.assertEqual(flatten_mesh.size(), self.world_size)
         self.assertEqual(flatten_mesh.get_local_rank(), dist.get_rank())
