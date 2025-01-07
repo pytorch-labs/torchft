@@ -250,9 +250,9 @@ class ProcessGroupGloo(ProcessGroupWrapper):
     This is a reconfigurable version of ProcessGroupGloo.
     """
 
-    PG_CLASS: Type[
-        BaseProcessGroup
-    ] = BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
+    PG_CLASS: Type[BaseProcessGroup] = (
+        BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
+    )
 
     def getBackendName(self) -> str:
         return "torchft-gloo"
@@ -269,9 +269,9 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
     abort when reconfiguring, we need to ensure this is safe.
     """
 
-    PG_CLASS: Type[
-        BaseProcessGroup
-    ] = BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
+    PG_CLASS: Type[BaseProcessGroup] = (
+        BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
+    )
 
     def getBackendName(self) -> str:
         return "torchft-nccl"
@@ -745,9 +745,9 @@ class ProcessGroupBabyGloo(ProcessGroupBaby):
     ProcessGroupBabyNCCL.
     """
 
-    PG_CLASS: Type[
-        BaseProcessGroup
-    ] = BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
+    PG_CLASS: Type[BaseProcessGroup] = (
+        BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
+    )
 
     def getBackendName(self) -> str:
         return "torchft-baby-gloo"
@@ -769,9 +769,9 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
     tensors may leak in the current PyTorch implementation. TODO fix
     """
 
-    PG_CLASS: Type[
-        BaseProcessGroup
-    ] = BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
+    PG_CLASS: Type[BaseProcessGroup] = (
+        BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
+    )
     WORK_CLASS = _BabyWorkNCCL
 
     def getBackendName(self) -> str:
@@ -807,15 +807,19 @@ def extend_device_mesh(
     )
 
 
-class ManagedDeviceMesh(DeviceMesh):
+class _ManagedDeviceMesh(DeviceMesh):
     def __init__(
         self,
         mesh: Optional[DeviceMesh],
         mesh_dim_names: Tuple[str],
         replicate_pg: ManagedProcessGroup,
         replicate_dim: int,
-        parent: Optional["ManagedDeviceMesh"],
+        parent: Optional["_ManagedDeviceMesh"],
     ):
+        if mesh is None and parent is not None:
+            raise ValueError(
+                "_ManagedDeviceMesh doesn't support both mesh and parent are None."
+            )
         self.mesh = mesh
         self.mesh_dim_names = mesh_dim_names
         self.replicate_pg = replicate_pg
@@ -823,11 +827,14 @@ class ManagedDeviceMesh(DeviceMesh):
         self.replicate_dim_name = mesh_dim_names[replicate_dim]
         self.parent = parent
         self.flatten_meshes = {}
+        self.device_type = mesh.device_type if mesh is not None else parent.device_type
+        self._flatten_mesh_list = tuple()
+        self._thread_id = None
 
     def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
         if isinstance(mesh_dim_names, str):
             if mesh_dim_names == self.replicate_dim_name:
-                return ManagedDeviceMesh(
+                return _ManagedDeviceMesh(
                     mesh=None,
                     mesh_dim_names=(mesh_dim_names,),
                     replicate_pg=self.replicate_pg,
@@ -843,13 +850,16 @@ class ManagedDeviceMesh(DeviceMesh):
             if self.replicate_dim_name in mesh_dim_names:
                 return self.mesh[mesh_dim_names]
             else:
-                return ManagedDeviceMesh(
+                return _ManagedDeviceMesh(
                     self.mesh[mesh_dim_names],
                     mesh_dim_names,
                     self.replicate_pg,
                     mesh_dim_name.index(self.replicate_dim_name),
                     parent=self,
                 )
+
+    def _real_mesh_dim(self, mesh_dim: int) -> int:
+        return mesh_dim - 1 if mesh_dim > self.replicate_dim else mesh_dim
 
     def get_group(self, mesh_dim: Optional[str] = None) -> BaseProcessGroup:
         if mesh_dim is None:
@@ -858,7 +868,7 @@ class ManagedDeviceMesh(DeviceMesh):
         elif mesh_dim == self.replicate_dim_name:
             return self.replicate_pg
         else:
-            return self.mesh.get_group(mesh_dim)
+            return self.mesh.get_group(self._real_mesh_dim(mesh_dim))
 
     def _flatten(self, mesh_dim_name: str) -> "DeviceMesh":
         flatten_mesh = _FlattenDeviceMesh(self)
@@ -877,7 +887,7 @@ class ManagedDeviceMesh(DeviceMesh):
         elif mesh_dim == self.replicate_dim:
             return self.replicate_pg.size()
         else:
-            return self.mesh.size(mesh_dim)
+            return self.mesh.size(self._real_mesh_dim(mesh_dim))
 
     @property
     def ndim(self) -> int:
@@ -904,14 +914,21 @@ class ManagedDeviceMesh(DeviceMesh):
         elif mesh_dim in (self.replicate_dim, self.replicate_dim_name):
             return get_rank(self.replicate_pg)
         else:
-            return self.mesh.get_local_rank(mesh_dim)
+            return self.mesh.get_local_rank(self._real_mesh_dim(mesh_dim))
+
+    def get_coordinate(self) -> Optional[List[int]]:
+        """
+        Return the relative indices of this rank relative to all
+        dimensions of the mesh. If this rank is not part of the mesh, return None.
+        """
+        return self.mesh._coordinate_on_dim if self.mesh._coordinate_on_dim else None
 
     def get_all_groups(self) -> List[ProcessGroup]:
         raise NotImplementedError
 
 
 class _FlattenDeviceMesh(DeviceMesh):
-    def __init__(self, managed_mesh: ManagedDeviceMesh):
+    def __init__(self, managed_mesh: _ManagedDeviceMesh):
         self.managed_mesh = managed_mesh
 
     def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
@@ -954,7 +971,7 @@ def ft_init_device_mesh(
     replicate_dim: int,
     manager: "Manager",
 ):
-    # We have to lie DeviceMesh that the replicate_dim has only
+    # We need to mislead DeviceMesh into thinking that replicate_dim has only
     # 1 rank.
     _mesh_shape = list(mesh_shape)
     _mesh_shape.pop(replicate_dim)
@@ -979,7 +996,7 @@ def ft_init_device_mesh(
     # the same backend has been registered.
     replicate_pg.register(mesh_dim_names[replicate_dim])
 
-    return ManagedDeviceMesh(
+    return _ManagedDeviceMesh(
         mesh=mesh,
         mesh_dim_names=mesh_dim_names,
         replicate_pg=replicate_pg,

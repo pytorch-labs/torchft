@@ -33,7 +33,6 @@ from torch.testing._internal.common_distributed import MultiProcessTestCase
 from torchft.manager import Manager
 from torchft.process_group import (
     ErrorSwallowingProcessGroupWrapper,
-    ManagedDeviceMesh,
     ManagedProcessGroup,
     ProcessGroup,
     ProcessGroupBabyGloo,
