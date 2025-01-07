@@ -7,32 +7,32 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Tuple
-from unittest import skipUnless, TestCase
+from unittest import TestCase, skipUnless
 from unittest.mock import Mock
 
 import torch
 import torch.distributed as dist
 from torch import nn
 from torch._C._distributed_c10d import (
-    _resolve_process_group,
     AllgatherOptions,
     AllreduceOptions,
     BroadcastOptions,
     ReduceOp,
+    _resolve_process_group,
 )
 from torch.distributed import (
-    _functional_collectives,
-    get_world_size,
     ReduceOp,
     TCPStore,
     Work,
+    _functional_collectives,
+    get_world_size,
 )
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import MultiProcessTestCase
 
 from torchft.manager import Manager
-from torchft.process_group import ft_init_device_mesh, ManagedProcessGroup
+from torchft.process_group import ManagedProcessGroup, ft_init_device_mesh
 
 
 class FSDPTest(MultiProcessTestCase):
