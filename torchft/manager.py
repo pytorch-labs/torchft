@@ -102,7 +102,10 @@ class Manager:
             min_replica_size: minimum number of replicas on each step
             port: if rank==0, the port to run the manager server on
             use_async_quorum: whether to run the quorum asynchronously during the forward pass
-            timeout: timeout for all operations
+            timeout:
+                the default timeout for all operation, if you're using per
+                request timeouts this should be longer than the longest request
+                timeout.
             rank: the replica group local rank
             world_size: the replica group local world size
             store_addr: TCPStore address for this replica group
@@ -279,7 +282,10 @@ class Manager:
         return self._errored
 
     def wrap_future(
-        self, fut: torch.futures.Future[T], default: T
+        self,
+        fut: torch.futures.Future[T],
+        default: T,
+        timeout: Optional[timedelta] = None,
     ) -> torch.futures.Future[T]:
         """
         Wrap a Future and swallow any errors that occur and report them to the manager.
@@ -289,10 +295,11 @@ class Manager:
         Args:
             fut: the Future to wrap
             default: the default value to complete the Future with if an error occurs
+            timeout: the timeout for the Future, if None, the manager's timeout will be used
         """
 
         # add a timeout to the future
-        fut = future_timeout(fut, self._timeout)
+        fut = future_timeout(fut, timeout or self._timeout)
 
         # schedule error handling as a continuation on the Future
         def callback(
@@ -313,7 +320,12 @@ class Manager:
         self._pending_work.append(cast(torch.futures.Future[object], fut))
         return fut
 
-    def start_quorum(self, room_id: str = "default", allow_heal: bool = True) -> None:
+    def start_quorum(
+        self,
+        room_id: str = "default",
+        allow_heal: bool = True,
+        timeout: Optional[timedelta] = None,
+    ) -> None:
         """
         .. note::
             We recommend using the :py:class:`torchft.optim.OptimizerWrapper` instead of calling this directly.
@@ -331,6 +343,7 @@ class Manager:
                 calls. All replicas must pass the same value to allow_heal.
             room_id: (experimental) the room id to use for quorum, this allows
                 for multiple quorums to be used within the same job.
+            timeout: the timeout for quorum and recovery operations, if None, the manager's timeout will be used
         """
 
         # wait for previous quorum to complete
@@ -345,7 +358,10 @@ class Manager:
         # block to allow gracefully recovering from issues in PG setup and quorum.
 
         self._quorum_future = self._executor.submit(
-            self._async_quorum, room_id=room_id, allow_heal=allow_heal
+            self._async_quorum,
+            room_id=room_id,
+            allow_heal=allow_heal,
+            timeout=timeout or self._timeout,
         )
         if not self._use_async_quorum:
             self.wait_quorum()
@@ -369,7 +385,7 @@ class Manager:
         ), "must call start_quorum before wait_quorum"
         self._quorum_future.result()
 
-    def _async_quorum(self, room_id: str, allow_heal: bool) -> None:
+    def _async_quorum(self, room_id: str, allow_heal: bool, timeout: timedelta) -> None:
         (
             quorum_id,
             replica_rank,
@@ -385,6 +401,7 @@ class Manager:
             rank=self._rank,
             step=self._step,
             checkpoint_server_addr=self._ckpt_server.address(),
+            timeout=timeout,
         )
 
         # When using async quorum we need to take the recovered workers.
@@ -422,8 +439,10 @@ class Manager:
             self._logger.info(
                 f"healing required, fetching checkpoint server address from {address=} {max_step=}"
             )
-            primary_client = ManagerClient(address, timeout=self._timeout)
-            checkpoint_server_address = primary_client.checkpoint_address(self._rank)
+            primary_client = ManagerClient(address, timeout=timeout)
+            checkpoint_server_address = primary_client.checkpoint_address(
+                self._rank, timeout=timeout
+            )
 
             self._logger.info(f"fetching checkpoint from {checkpoint_server_address=}")
             self._pending_state_dict = CheckpointServer.load_from_address(
@@ -449,7 +468,7 @@ class Manager:
         self._load_state_dict(self._pending_state_dict["user"])
         self._pending_state_dict = None
 
-    def should_commit(self) -> bool:
+    def should_commit(self, timeout: Optional[timedelta] = None) -> bool:
         """
         .. note::
             We recommend using the :py:class:`torchft.optim.OptimizerWrapper` instead of calling this directly.
@@ -486,7 +505,10 @@ class Manager:
         enough_replicas = self.num_participants() >= self._min_replica_size
         local_should_commit = enough_replicas and self._errored is None
         should_commit = self._client.should_commit(
-            self._rank, self._step, local_should_commit
+            self._rank,
+            self._step,
+            local_should_commit,
+            timeout=timeout or self._timeout,
         )
         self._logger.info(
             f"should_commit={should_commit} enough_replicas={enough_replicas}, errored={self._errored}"
