@@ -857,6 +857,7 @@ class ManagedDeviceMesh(DeviceMesh):
                 assert self.mesh is not None
                 return self.mesh[mesh_dim_names]
             else:
+                assert self.mesh is not None
                 return ManagedDeviceMesh(
                     self.mesh[mesh_dim_names],
                     mesh_dim_names,
@@ -883,8 +884,10 @@ class ManagedDeviceMesh(DeviceMesh):
             assert self.mesh is not None
             return self.mesh.get_group(self._real_mesh_dim(dim))
 
-    def _flatten(self, mesh_dim_name: str) -> "DeviceMesh":
+    def _flatten(self, mesh_dim_name: Optional[str]) -> "DeviceMesh":
         flatten_mesh = _FlattenDeviceMesh(self)
+        if mesh_dim_name is None:
+            raise ValueError("ManagedDeviceMesh._flatten requires `mesh_dim_name`")
         if self.parent is None:
             self.flatten_meshes[mesh_dim_name] = flatten_mesh
         else:
@@ -901,6 +904,7 @@ class ManagedDeviceMesh(DeviceMesh):
         elif mesh_dim == self.replicate_dim:
             return self.replicate_pg.size()
         else:
+            assert self.mesh is not None
             return self.mesh.size(self._real_mesh_dim(mesh_dim))
 
     @property
