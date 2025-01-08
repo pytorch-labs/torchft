@@ -827,9 +827,12 @@ class ManagedDeviceMesh(DeviceMesh):
         self.replicate_dim_name: str = mesh_dim_names[replicate_dim]
         self.parent = parent
         self.flatten_meshes: Dict[str, DeviceMesh] = {}
-        self.device_type: str = (
-            mesh.device_type if mesh is not None else parent.device_type
-        )
+        self.device_type: str
+        if mesh is not None:
+            self.device_type = mesh.device_type
+        else:
+            assert parent is not None
+            self.device_type = parent.device_type
         self._flatten_mesh_list: Tuple[DeviceMesh, ...] = tuple()
         self._thread_id: Optional[int] = None
 
@@ -851,6 +854,7 @@ class ManagedDeviceMesh(DeviceMesh):
         else:
             assert isinstance(mesh_dim_names, tuple)
             if self.replicate_dim_name in mesh_dim_names:
+                assert self.mesh is not None
                 return self.mesh[mesh_dim_names]
             else:
                 return ManagedDeviceMesh(
@@ -871,11 +875,12 @@ class ManagedDeviceMesh(DeviceMesh):
             dim = 0 if mesh_dim is None else int(mesh_dim)
 
         if mesh_dim is None:
-            assert self.mesh is None
+            assert self.mesh is not None
             return self.replicate_pg
         elif dim == self.replicate_dim:
             return self.replicate_pg
         else:
+            assert self.mesh is not None
             return self.mesh.get_group(self._real_mesh_dim(dim))
 
     def _flatten(self, mesh_dim_name: str) -> "DeviceMesh":
@@ -891,6 +896,7 @@ class ManagedDeviceMesh(DeviceMesh):
             if self.mesh is None:
                 return self.replicate_pg.size()
             else:
+                assert self.mesh is not None
                 return self.mesh.size() * self.replicate_pg.size()
         elif mesh_dim == self.replicate_dim:
             return self.replicate_pg.size()
@@ -904,9 +910,10 @@ class ManagedDeviceMesh(DeviceMesh):
 
     @property
     def shape(self) -> Tuple[int, ...]:
-        ret = list(self.mesh.shape)
+        assert self.mesh is not None
+        ret: List[int] = list(self.mesh.shape)
         ret.insert(self.replicate_dim, self.replicate_pg.size())
-        return ret
+        return tuple(ret)
 
     def get_rank(self) -> int:
         assert self.mesh is not None
@@ -923,6 +930,7 @@ class ManagedDeviceMesh(DeviceMesh):
                 return get_rank(self.replicate_pg)
 
             assert self.replicate_dim == 0, "replicate_dim must be the first one"
+            assert self.mesh is not None
             other_dim_size = self.mesh.size()
             assert self.mesh is not None
             other_dim_rank = self.mesh.get_local_rank()
