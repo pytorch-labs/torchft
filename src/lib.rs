@@ -225,7 +225,12 @@ struct Lighthouse {
 #[pymethods]
 impl Lighthouse {
     #[new]
-    fn new(py: Python<'_>, bind: String, min_replicas: u64, join_timeout_ms: Option<u64>) -> PyResult<Self> {
+    fn new(
+        py: Python<'_>,
+        bind: String,
+        min_replicas: u64,
+        join_timeout_ms: Option<u64>,
+    ) -> PyResult<Self> {
         let join_timeout_ms = join_timeout_ms.unwrap_or(100);
 
         py.allow_threads(move || {
