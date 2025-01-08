@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from torchft.process_group import ProcessGroup
 
 MANAGER_ADDR_KEY: str = "manager_addr"
-MANAGER_DEFAULT_PORT: int = int(os.environ.get("TORCHFT_MANAGER_PORT", 29511))
+MANAGER_PORT_ENV: str = "TORCHFT_MANAGER_PORT"
 REPLICA_ID_KEY: str = "replica_id"
 
 T = TypeVar("T")
@@ -74,6 +74,12 @@ class Manager:
     """
     Manager manages the full fault tolerant training loop.
 
+    This requires the that the TCPStore specified by the store_addr and
+    store_port or MASTER_ADDR and MASTER_PORT environment variables to be
+    started prior to creating this manager. If using a modern version of
+    torchelastic this will already be the case. Otherwise, it should be started
+    via torch.distributed.init_process_group prior to creating this manager.
+
     NOTE: when saving periodic checkpoints you must save and restore the
     Manager's state_dict as well to avoid synchronization issues.
     """
@@ -84,7 +90,6 @@ class Manager:
         load_state_dict: Callable[[T], None],
         state_dict: Callable[[], T],
         min_replica_size: int,
-        port: int = MANAGER_DEFAULT_PORT,
         use_async_quorum: bool = True,
         timeout: timedelta = timedelta(seconds=60),
         rank: Optional[int] = None,
@@ -94,13 +99,18 @@ class Manager:
         store_port: Optional[int] = None,
         lighthouse_addr: Optional[str] = None,
         replica_id: Optional[str] = None,
+        port: Optional[int] = None,
     ) -> None:
         """
         Args:
             load_state_dict: function to load the state dict when recovering
             state_dict: function to save the state dict with recovering
             min_replica_size: minimum number of replicas on each step
-            port: if rank==0, the port to run the manager server on
+            port: if rank==0, the port to run the manager server on.
+                Port assignment priority:
+                1. this argument
+                2. TORCHFT_MANAGER_PORT env var
+                3. arbitrary port assigned via 0
             use_async_quorum: whether to run the quorum asynchronously during the forward pass
             timeout: timeout for all operations
             rank: the replica group local rank
@@ -147,6 +157,10 @@ class Manager:
 
         if rank == 0:
             hostname = socket.gethostname()
+
+            if port is None:
+                port = int(os.environ.get(MANAGER_PORT_ENV, 0))
+
             addr = f"http://{hostname}:{port}"
             bind = f"[::]:{port}"
             lighthouse_addr = lighthouse_addr or os.environ["TORCHFT_LIGHTHOUSE"]
@@ -163,7 +177,7 @@ class Manager:
                 world_size=world_size,
             )
 
-            self._store.set(MANAGER_ADDR_KEY, addr)
+            self._store.set(MANAGER_ADDR_KEY, self._manager.address())
             self._store.set(REPLICA_ID_KEY, replica_id)
 
         addr = self._store.get(MANAGER_ADDR_KEY).decode("utf-8")
