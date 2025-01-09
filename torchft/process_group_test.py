@@ -29,6 +29,7 @@ from torch.distributed import (
 )
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import MultiProcessTestCase
+from torch.testing._internal.common_utils import run_tests
 
 from torchft.manager import Manager
 from torchft.process_group import (
@@ -346,3 +347,7 @@ class DeviceMeshTest(MultiProcessTestCase):
         manager.num_participants.return_value = 1
         self.assertEqual(flatten_mesh.size(), self.world_size)
         self.assertEqual(flatten_mesh.get_local_rank(), dist.get_rank())
+
+
+if __name__ == "__main__":
+    run_tests()
