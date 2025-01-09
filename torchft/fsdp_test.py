@@ -47,7 +47,6 @@ class FSDPTest(MultiProcessTestCase):
 
     def test_fsdp(self) -> None:
         group_size = self.world_size // 2
-        # pyre-ignore[16]
         group = self.rank // group_size
         group_rank = self.rank % group_size
 

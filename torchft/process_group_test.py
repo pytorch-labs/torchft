@@ -316,7 +316,6 @@ class DeviceMeshTest(MultiProcessTestCase):
 
     def test_init_device_mesh(self) -> None:
         os.environ["MASTER_PORT"] = str(12346)
-        # pyre-ignore[16]
         os.environ["RANK"] = str(self.rank)
         os.environ["WORLD_SIZE"] = str(4)
 
@@ -332,7 +331,6 @@ class DeviceMeshTest(MultiProcessTestCase):
             manager=manager,
         )
 
-        # pyre-ignore[16]
         self.assertTrue(
             isinstance(device_mesh.get_group("dp_replicate"), ManagedProcessGroup)
         )
