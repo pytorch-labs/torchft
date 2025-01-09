@@ -1,8 +1,11 @@
-import torch.distributed as dist
-from unittest import TestCase
-from torchft.torchft import Lighthouse
-from torchft import Manager, ProcessGroupGloo
 import time
+from unittest import TestCase
+
+import torch.distributed as dist
+
+from torchft import Manager, ProcessGroupGloo
+from torchft.torchft import Lighthouse
+
 
 class TestLighthouse(TestCase):
     def test_join_timeout_behavior(self) -> None:
@@ -14,7 +17,7 @@ class TestLighthouse(TestCase):
             min_replicas=1,
             join_timeout_ms=100,
         )
-        
+
         # Create a manager that tries to join
         try:
             store = dist.TCPStore(
@@ -37,7 +40,7 @@ class TestLighthouse(TestCase):
                 use_async_quorum=False,
                 lighthouse_addr=lighthouse.address(),
             )
-            
+
             start_time = time.time()
             manager.start_quorum()
             time_taken = time.time() - start_time
@@ -46,15 +49,15 @@ class TestLighthouse(TestCase):
         finally:
             # Cleanup
             lighthouse.shutdown()
-            if 'manager' in locals():
+            if "manager" in locals():
                 manager.shutdown()
-    
+
         lighthouse = Lighthouse(
             bind="[::]:0",
             min_replicas=1,
             join_timeout_ms=400,
         )
-        
+
         # Create a manager that tries to join
         try:
             store = dist.TCPStore(
@@ -77,7 +80,7 @@ class TestLighthouse(TestCase):
                 use_async_quorum=False,
                 lighthouse_addr=lighthouse.address(),
             )
-            
+
             start_time = time.time()
             manager.start_quorum()
             time_taken = time.time() - start_time
@@ -86,6 +89,5 @@ class TestLighthouse(TestCase):
         finally:
             # Cleanup
             lighthouse.shutdown()
-            if 'manager' in locals():
+            if "manager" in locals():
                 manager.shutdown()
-    
