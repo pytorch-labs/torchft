@@ -25,7 +25,8 @@ dev = [
     "pytest",
     "black",
     "pyre-check",
-    "parameterized"
+    "parameterized",
+    "expecttest"
 ]
 
 [tool.maturin]
