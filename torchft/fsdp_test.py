@@ -5,9 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Tuple
-from unittest import TestCase, skipUnless
 from unittest.mock import Mock
 
 import torch
