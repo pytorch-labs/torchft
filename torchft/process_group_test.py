@@ -316,6 +316,7 @@ class DeviceMeshTest(MultiProcessTestCase):
         self._spawn_processes()
 
     def test_init_device_mesh(self) -> None:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = str(12346)
         os.environ["RANK"] = str(self.rank)
         os.environ["WORLD_SIZE"] = str(4)

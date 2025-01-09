@@ -816,7 +816,7 @@ class ManagedDeviceMesh(DeviceMesh):
         replicate_dim: int,
         parent: Optional["ManagedDeviceMesh"],
     ) -> None:
-        if mesh is None and parent is not None:
+        if mesh is None and parent is None:
             raise ValueError(
                 "ManagedDeviceMesh doesn't support both mesh and parent are None."
             )
@@ -876,7 +876,6 @@ class ManagedDeviceMesh(DeviceMesh):
             dim = 0 if mesh_dim is None else int(mesh_dim)
 
         if mesh_dim is None:
-            assert self.mesh is not None
             return self.replicate_pg
         elif dim == self.replicate_dim:
             return self.replicate_pg
