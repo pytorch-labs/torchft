@@ -4,7 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import multiprocessing
 import os
+import unittest
+from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Dict, Tuple
 from unittest.mock import Mock
 
@@ -33,20 +36,14 @@ from torchft.manager import Manager
 from torchft.process_group import ManagedProcessGroup, ft_init_device_mesh
 
 
-class FSDPTest(MultiProcessTestCase):
-    @property
-    def world_size(self) -> int:
-        return 4
+class FSDPTest(unittest.TestCase):
+    @staticmethod
+    def _test_fsdp(world_size: int, rank: int) -> None:
+        torch.cuda.set_device(rank)
 
-    def setUp(self) -> None:
-        super().setUp()
-        os.environ["TORCH_NCCL_DESYNC_DEBUG"] = "0"
-        self._spawn_processes()
-
-    def test_fsdp(self) -> None:
-        group_size = self.world_size // 2
-        group = self.rank // group_size
-        group_rank = self.rank % group_size
+        group_size = world_size // 2
+        group = rank // group_size
+        group_rank = rank % group_size
 
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = str(12346 + group)
@@ -66,3 +63,12 @@ class FSDPTest(MultiProcessTestCase):
         batch = torch.randn(4, 128).cuda()
         shard_model = fully_shard(model, mesh=device_mesh)
         shard_model(batch).mean().backward()
+
+    @unittest.skipIf(torch.cuda.device_count() < 4, "Not enough GPUs")
+    def test_fsdp(self) -> None:
+        multiprocessing.set_start_method("spawn")
+        with ProcessPoolExecutor(max_workers=4) as executor:
+            futures = []
+            for i in range(4):
+                future = executor.submit(self._test_fsdp, 4, i)
+                futures.append(future)

@@ -180,9 +180,9 @@ impl ManagerService for Arc<Manager> {
         &self,
         request: Request<ManagerQuorumRequest>,
     ) -> Result<Response<ManagerQuorumResponse>, Status> {
-        let req = request.into_inner();
+        let req = request.get_ref();
         let rank = req.rank;
-        let room_id = req.room_id;
+        let room_id = &req.room_id;
 
         info!("{}: got quorum request for rank {}", room_id, rank);
 
@@ -195,7 +195,7 @@ impl ManagerService for Arc<Manager> {
                 .checkpoint_servers
                 .insert(req.rank, req.checkpoint_server_addr.clone());
 
-            if !state.rooms.contains_key(&room_id) {
+            if !state.rooms.contains_key(room_id) {
                 let (tx, _) = broadcast::channel(16);
 
                 state.rooms.insert(
@@ -207,7 +207,7 @@ impl ManagerService for Arc<Manager> {
                 );
             }
 
-            let room = state.rooms.get_mut(&room_id).unwrap();
+            let room = state.rooms.get_mut(room_id).unwrap();
 
             // TODO check step
             room.participants.insert(rank);
@@ -224,7 +224,7 @@ impl ManagerService for Arc<Manager> {
                     .await
                     .map_err(|e| Status::from_error(e.into()))?;
 
-                let request = tonic::Request::new(LighthouseQuorumRequest {
+                let mut lighthouse_request = tonic::Request::new(LighthouseQuorumRequest {
                     room_id: room_id.clone(),
                     requester: Some(QuorumMember {
                         replica_id: self.replica_id.clone(),
@@ -235,7 +235,16 @@ impl ManagerService for Arc<Manager> {
                     }),
                 });
 
-                let response = client.quorum(request).await.unwrap();
+                // propagate timeout from request to lighthouse
+                let timeout = request
+                    .metadata()
+                    .get("grpc-timeout")
+                    .ok_or_else(|| Status::internal("grpc-timeout not set"))?;
+                lighthouse_request
+                    .metadata_mut()
+                    .insert("grpc-timeout", timeout.clone());
+
+                let response = client.quorum(lighthouse_request).await.unwrap();
                 let resp = response.into_inner();
 
                 info!("{}: got lighthouse quorum {:?}", room_id, resp);
@@ -471,12 +480,13 @@ mod tests {
 
         let mut client = manager_client_new(manager.address(), Duration::from_secs(10)).await?;
 
-        let request = tonic::Request::new(ManagerQuorumRequest {
+        let mut request = tonic::Request::new(ManagerQuorumRequest {
             room_id: "room".to_string(),
             rank: 0,
             step: 123,
             checkpoint_server_addr: "addr".to_string(),
         });
+        request.set_timeout(Duration::from_secs(10));
         let resp = client.quorum(request).await?.into_inner();
 
         manager_fut.abort();
@@ -526,12 +536,13 @@ mod tests {
                 let mut client =
                     manager_client_new(manager.address(), Duration::from_secs(10)).await?;
 
-                let request = tonic::Request::new(ManagerQuorumRequest {
+                let mut request = tonic::Request::new(ManagerQuorumRequest {
                     room_id: "room".to_string(),
                     rank: 0,
                     step: 0,
                     checkpoint_server_addr: "addr".to_string(),
                 });
+                request.set_timeout(Duration::from_secs(10));
 
                 let result = client.quorum(request).await?.into_inner();
 

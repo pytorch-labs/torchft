@@ -4,8 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import multiprocessing
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from datetime import timedelta
+import unittest
 from typing import Any, Dict, Tuple
 from unittest import TestCase, skipUnless
 from unittest.mock import Mock
@@ -28,8 +31,6 @@ from torch.distributed import (
     get_world_size,
 )
 from torch.distributed.device_mesh import init_device_mesh
-from torch.testing._internal.common_distributed import MultiProcessTestCase
-from torch.testing._internal.common_utils import run_tests
 
 from torchft.manager import Manager
 from torchft.process_group import (
@@ -125,6 +126,16 @@ class ProcessGroupTest(TestCase):
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3))
 
+    def test_gloo_timeout(self) -> None:
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+
+        store_addr = f"localhost:{store.port}/prefix"
+        pg = ProcessGroupGloo(timeout=timedelta(seconds=0.01))
+        with self.assertRaisesRegex(RuntimeError, "timeout after 10ms"):
+            pg.configure(store_addr, 0, 2)
+
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.cuda.is_available(), "needs CUDA")
     def test_nccl(self) -> None:
@@ -158,28 +169,44 @@ class ProcessGroupTest(TestCase):
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
 
-        store_addr = f"localhost:{store.port}/prefix"
+        store_addr: str = f"localhost:{store.port}/prefix"
 
-        a = ProcessGroupBabyGloo()
-        b = ProcessGroupBabyGloo()
+        def run(rank: int) -> Tuple[torch.Tensor, Work]:
+            a = ProcessGroupBabyGloo()
+            a.configure(store_addr, rank, 2)
 
-        a.configure(store_addr, 0, 2)
-        b.configure(store_addr, 1, 2)
+            self.assertEqual(a.size(), 2)
 
-        self.assertEqual(a.size(), 2)
+            at = torch.tensor([rank + 1])
 
-        at = torch.tensor([1])
-        bt = torch.tensor([2])
+            a_work = a.allreduce([at], ReduceOp.SUM)
+            return at, a_work
 
-        a_work = a.allreduce([at], ReduceOp.SUM)
-        b_work = b.allreduce([bt], ReduceOp.SUM)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            a_fut = executor.submit(run, 0)
+            b_fut = executor.submit(run, 1)
+
+        at, a_work = a_fut.result()
+        bt, b_work = b_fut.result()
 
         a_work.wait()
         fut = b_work.get_future()
 
         fut.wait()
 
-        torch.testing.assert_close(at, bt)
+        torch.testing.assert_close(at, torch.tensor([3]))
+        torch.testing.assert_close(bt, torch.tensor([3]))
+
+    def test_baby_gloo_timeout(self) -> None:
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+
+        store_addr = f"localhost:{store.port}/prefix"
+
+        a = ProcessGroupBabyGloo(timeout=timedelta(seconds=0.01))
+        with self.assertRaisesRegex(TimeoutError, "timed out after 0.01 seconds"):
+            a.configure(store_addr, 0, 2)
 
     def test_dummy(self) -> None:
         pg = ProcessGroupDummy(0, 1)
@@ -305,21 +332,15 @@ class ProcessGroupTest(TestCase):
         self.assertEqual(manager.wrap_future.call_count, 1)
 
 
-class DeviceMeshTest(MultiProcessTestCase):
-    @property
-    def world_size(self) -> int:
-        return 4
-
-    def setUp(self) -> None:
-        super().setUp()
-        os.environ["TORCH_NCCL_DESYNC_DEBUG"] = "0"
-        self._spawn_processes()
-
-    def test_init_device_mesh(self) -> None:
+class DeviceMeshTest(TestCase):
+    @staticmethod
+    def _test_init_device_mesh(world_size: int, rank: int) -> None:
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = str(12346)
-        os.environ["RANK"] = str(self.rank)
+        os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(4)
+
+        testcase = TestCase()
 
         manager = Mock(spec=Manager)
         # Even though we only have 4 workers, we can still initialize (2, 4) mesh.
@@ -327,28 +348,30 @@ class DeviceMeshTest(MultiProcessTestCase):
         # real mesh but is virtually added to the mesh via ManagedDeviceMesh.
         device_mesh = ft_init_device_mesh(
             device_type="cpu",
-            mesh_shape=(2, self.world_size),
+            mesh_shape=(2, world_size),
             mesh_dim_names=("dp_replicate", "dp_shard"),
             replicate_dim=0,
             manager=manager,
         )
 
-        self.assertTrue(
+        testcase.assertTrue(
             isinstance(device_mesh.get_group("dp_replicate"), ManagedProcessGroup)
         )
-        self.assertTrue(
+        testcase.assertTrue(
             not isinstance(device_mesh.get_group("dp_shard"), ManagedProcessGroup)
         )
         replicate_group = device_mesh.get_group("dp_replicate")
-        # pyre-ignore[16]
-        self.assertEqual(replicate_group._manager, manager)
+        testcase.assertEqual(replicate_group._manager, manager)
         replicate_mesh = device_mesh["dp_replicate"]
-        self.assertEqual(replicate_mesh.get_group(), replicate_group)
+        testcase.assertEqual(replicate_mesh.get_group(), replicate_group)
         flatten_mesh = device_mesh._flatten("dp")
         manager.num_participants.return_value = 1
-        self.assertEqual(flatten_mesh.size(), self.world_size)
-        self.assertEqual(flatten_mesh.get_local_rank(), dist.get_rank())
+        testcase.assertEqual(flatten_mesh.size(), world_size)
+        testcase.assertEqual(flatten_mesh.get_local_rank(), dist.get_rank())
 
-
-if __name__ == "__main__":
-    run_tests()
+    def test_init_device_mesh(self) -> None:
+        with ProcessPoolExecutor(max_workers=4) as executor:
+            futures = []
+            for i in range(4):
+                future = executor.submit(self._test_init_device_mesh, 4, i)
+                futures.append(future)
