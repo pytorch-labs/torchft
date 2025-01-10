@@ -30,7 +30,6 @@ from torch.distributed import (
 )
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
-from torch.testing._internal.common_distributed import MultiProcessTestCase
 
 from torchft.manager import Manager
 from torchft.process_group import ManagedProcessGroup, ft_init_device_mesh
