@@ -58,6 +58,7 @@ pub struct Manager {
     state: Mutex<ManagerState>,
     listener: Mutex<Option<tokio::net::TcpListener>>,
     local_addr: SocketAddr,
+    heartbeat_interval: Duration,
 }
 
 pub async fn manager_client_new(
@@ -83,6 +84,7 @@ impl Manager {
         bind: String,
         store_addr: String,
         world_size: u64,
+        heartbeat_interval: Duration,
     ) -> Result<Arc<Self>> {
         let listener = tokio::net::TcpListener::bind(&bind).await?;
         let local_addr = listener.local_addr()?;
@@ -95,6 +97,7 @@ impl Manager {
             hostname: hostname,
             store_address: store_addr,
             world_size: world_size,
+            heartbeat_interval: heartbeat_interval,
             state: Mutex::new(ManagerState {
                 checkpoint_servers: HashMap::new(),
                 rooms: HashMap::new(),
@@ -152,7 +155,7 @@ impl Manager {
 
             let _response = client.heartbeat(request).await;
 
-            sleep(Duration::from_millis(100)).await;
+            sleep(self.heartbeat_interval).await;
         }
     }
 
@@ -426,7 +429,8 @@ mod tests {
             "addr".to_string(),
             "[::]:29531".to_string(),
             "store_addr".to_string(),
-            2,
+            2,                          // world size
+            Duration::from_millis(100), // heartbeat interval
         )
         .await?;
         let manager_fut = tokio::spawn(manager._run_grpc());
@@ -459,6 +463,7 @@ mod tests {
             join_timeout_ms: 100,
             min_replicas: 1,
             quorum_tick_ms: 100,
+            heartbeat_timeout_ms: 5000,
         })
         .await?;
         let lighthouse_fut = tokio::spawn(lighthouse.clone().run());
@@ -469,7 +474,8 @@ mod tests {
             "localhost".to_string(),
             "[::]:0".to_string(),
             "store_addr".to_string(),
-            1, // world size
+            1,                          // world size
+            Duration::from_millis(100), // heartbeat interval
         )
         .await?;
         let manager_fut = tokio::spawn(manager.clone().run());
@@ -508,6 +514,7 @@ mod tests {
             join_timeout_ms: 100,
             min_replicas: 2,
             quorum_tick_ms: 100,
+            heartbeat_timeout_ms: 5000,
         })
         .await?;
         let lighthouse_fut = tokio::spawn(lighthouse.clone().run());
@@ -524,7 +531,8 @@ mod tests {
                     "localhost".to_string(),
                     "[::]:0".to_string(),
                     "store_addr".to_string(),
-                    1, // world size
+                    1,                          // world size
+                    Duration::from_millis(100), // heartbeat interval
                 )
                 .await?;
                 let manager_fut = tokio::spawn(manager.clone().run());

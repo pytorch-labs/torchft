@@ -38,6 +38,7 @@ use crate::torchftpb::{
     LighthouseQuorumResponse, Quorum, QuorumMember,
 };
 
+#[derive(Clone)]
 struct QuorumMemberDetails {
     joined: Instant,
     member: QuorumMember,
@@ -69,17 +70,39 @@ pub struct Lighthouse {
 #[structopt()]
 pub struct LighthouseOpt {
     // bind is the address to bind the server to.
-    #[structopt(long = "bind", default_value = "[::]:29510")]
+    #[structopt(
+        long = "bind",
+        default_value = "[::]:29510",
+        help = "Address to bind the server to"
+    )]
     pub bind: String,
 
-    #[structopt(long = "join_timeout_ms", default_value = "60000")]
+    #[structopt(
+        long = "join_timeout_ms",
+        default_value = "60000",
+        help = "How long to wait for new replicas to join before considering a quorum"
+    )]
     pub join_timeout_ms: u64,
 
-    #[structopt(long = "min_replicas")]
+    #[structopt(
+        long = "min_replicas",
+        help = "Minimum number of replicas to consider a quorum"
+    )]
     pub min_replicas: u64,
 
-    #[structopt(long = "quorum_tick_ms", default_value = "100")]
+    #[structopt(
+        long = "quorum_tick_ms",
+        default_value = "100",
+        help = "How frequently to check for quorum when waiting for workers."
+    )]
     pub quorum_tick_ms: u64,
+
+    #[structopt(
+        long = "heartbeat_timeout_ms",
+        default_value = "5000",
+        help = "how long to wait for a heartbeat before considering a replica dead."
+    )]
+    pub heartbeat_timeout_ms: u64,
 }
 
 fn quorum_changed(a: &Vec<QuorumMember>, b: &Vec<QuorumMember>) -> bool {
@@ -89,56 +112,94 @@ fn quorum_changed(a: &Vec<QuorumMember>, b: &Vec<QuorumMember>) -> bool {
     return a_ids != b_ids;
 }
 
-// Checks whether the quorum is valid and an explanation for the state.
-fn quorum_valid(state: &RoomState, opt: &LighthouseOpt) -> (bool, String) {
-    let mut first_joined = Instant::now();
+// Checks whether the quorum is valid, the new quorum and an explanation for the state.
+fn quorum_compute(
+    now: Instant,
+    heartbeats: &HashMap<String, Instant>,
+    state: &RoomState,
+    opt: &LighthouseOpt,
+) -> (Option<Vec<QuorumMember>>, String) {
+    let healthy_participants: HashMap<String, QuorumMemberDetails> = state
+        .participants
+        .clone()
+        .into_iter()
+        .filter(|(replica_id, _details)| {
+            let last_heartbeat = heartbeats.get(replica_id);
+            if last_heartbeat.is_none() {
+                return false;
+            }
 
-    for details in state.participants.values() {
-        if details.joined < first_joined {
-            first_joined = details.joined;
-        }
-    }
+            now.duration_since(*last_heartbeat.unwrap())
+                < Duration::from_millis(opt.heartbeat_timeout_ms)
+        })
+        .collect();
 
+    let mut candidate_participants: Vec<QuorumMember> = healthy_participants
+        .values()
+        .map(|details| details.member.clone())
+        .collect();
+
+    // Sort by replica ID to get a consistent ordering across runs.
+    candidate_participants.sort_by_key(|p| p.replica_id.clone());
+
+    let metadata = format!(
+        "[{}/{} participants healthy]",
+        healthy_participants.len(),
+        state.participants.len()
+    );
+
+    // Check if we can use the previous quorum.
     if state.prev_quorum.is_some() {
-        let mut is_fast_quorum = true;
         let prev_quorum = state.prev_quorum.as_ref().unwrap();
 
-        for prev_member in prev_quorum.participants.iter() {
-            if !state.participants.contains_key(&prev_member.replica_id) {
-                is_fast_quorum = false;
-                break;
-            }
-        }
+        // Fast quorum is when all previous participants are still in the quorum
+        // and we have enough participants to form a quorum.
+        let is_fast_quorum = prev_quorum
+            .participants
+            .iter()
+            .all(|prev_member| healthy_participants.contains_key(&prev_member.replica_id));
 
         if is_fast_quorum {
-            return (is_fast_quorum, format!("Fast quorum found!"));
+            return (
+                Some(candidate_participants),
+                format!("Fast quorum found! {}", metadata),
+            );
         }
     }
 
-    if state.participants.len() < opt.min_replicas as usize {
+    if healthy_participants.len() < opt.min_replicas as usize {
         return (
-            false,
+            None,
             format!(
-                "No quorum, only have {} participants, need {}",
-                state.participants.len(),
-                opt.min_replicas
+                "No quorum, only have {} participants, need {} {}",
+                healthy_participants.len(),
+                opt.min_replicas,
+                metadata
             ),
         );
     }
 
     // Quorum is valid at this point but lets wait for stragglers.
-
-    if Instant::now().duration_since(first_joined) < Duration::from_millis(opt.join_timeout_ms) {
+    let first_joined = healthy_participants
+        .values()
+        .map(|details| details.joined)
+        .min()
+        .unwrap_or(now);
+    if now.duration_since(first_joined) < Duration::from_millis(opt.join_timeout_ms) {
         return (
-            false,
+            None,
             format!(
-                "Valid quorum with {} participants, waiting for stragglers due to join timeout",
-                state.participants.len()
+                "Valid quorum with {} participants, waiting for stragglers due to join timeout {}",
+                healthy_participants.len(),
+                metadata
             ),
         );
     }
 
-    (true, format!("Valid quorum found"))
+    (
+        Some(candidate_participants),
+        format!("Valid quorum found {}", metadata),
+    )
 }
 
 impl Lighthouse {
@@ -155,19 +216,16 @@ impl Lighthouse {
         }))
     }
 
-    fn _quorum_tick(self: Arc<Self>, state: &mut RoomState) -> Result<()> {
-        let (quorum_met, reason) = quorum_valid(state, &self.opt);
+    fn _quorum_tick(
+        self: Arc<Self>,
+        heartbeats: &HashMap<String, Instant>,
+        state: &mut RoomState,
+    ) -> Result<()> {
+        let (quorum_met, reason) = quorum_compute(Instant::now(), heartbeats, state, &self.opt);
         info!("{}: {}", state.room_id, reason);
 
-        if quorum_met {
-            let mut participants: Vec<QuorumMember> = state
-                .participants
-                .values()
-                .map(|details| details.member.clone())
-                .collect();
-
-            // Sort by replica ID to get a consistent ordering across runs.
-            participants.sort_by_key(|p| p.replica_id.clone());
+        if quorum_met.is_some() {
+            let participants = quorum_met.unwrap();
 
             // only increment quorum ID if something about the quorum
             // changed (members/addresses/etc)
@@ -206,8 +264,9 @@ impl Lighthouse {
         loop {
             {
                 let mut state = self.state.lock().await;
+                let heartbeats = state.heartbeats.clone();
                 for (_room_id, room) in &mut state.rooms {
-                    self.clone()._quorum_tick(room)?;
+                    self.clone()._quorum_tick(&heartbeats, room)?;
                 }
             }
 
@@ -284,7 +343,8 @@ impl Lighthouse {
                 .rooms
                 .iter()
                 .map(|(room_id, room)| {
-                    let (_, quorum_status) = quorum_valid(&room, &self.opt);
+                    let (_, quorum_status) =
+                        quorum_compute(Instant::now(), &state.heartbeats, &room, &self.opt);
 
                     let max_step = {
                         if let Some(quorum) = room.prev_quorum.clone() {
@@ -314,7 +374,7 @@ impl Lighthouse {
                 rooms: rooms,
                 heartbeats: state.heartbeats.clone(),
                 old_age_threshold: Instant::now()
-                    .checked_sub(Duration::from_secs(1))
+                    .checked_sub(Duration::from_millis(self.opt.heartbeat_timeout_ms))
                     .unwrap_or(Instant::now()),
             }
         };
@@ -367,6 +427,13 @@ impl LighthouseService for Arc<Lighthouse> {
         let mut rx = {
             let mut state = self.state.lock().await;
 
+            // implicit heartbeat
+            state
+                .heartbeats
+                .insert(requester.replica_id.clone(), Instant::now());
+
+            let heartbeats = state.heartbeats.clone();
+
             if !state.rooms.contains_key(&room_id) {
                 let (tx, _) = broadcast::channel(16);
 
@@ -395,7 +462,7 @@ impl LighthouseService for Arc<Lighthouse> {
 
             // proactively run quorum tick
             self.clone()
-                ._quorum_tick(room)
+                ._quorum_tick(&heartbeats, room)
                 .map_err(|e| Status::from_error(e.into()))?;
 
             rx
@@ -497,6 +564,7 @@ mod tests {
             bind: "[::]:0".to_string(),
             join_timeout_ms: 60 * 60 * 1000, // 1hr
             quorum_tick_ms: 10,
+            heartbeat_timeout_ms: 5000,
         };
 
         let mut state = RoomState {
@@ -506,13 +574,16 @@ mod tests {
             prev_quorum: None,
             quorum_id: 0,
         };
+        let mut heartbeats = HashMap::new();
 
-        assert!(!quorum_valid(&state, &opt).0);
+        let now = Instant::now();
+
+        assert!(!quorum_compute(now, &heartbeats, &state, &opt).0.is_some());
 
         state.participants.insert(
             "a".to_string(),
             QuorumMemberDetails {
-                joined: Instant::now(),
+                joined: now,
                 member: QuorumMember {
                     replica_id: "a".to_string(),
                     address: "".to_string(),
@@ -522,13 +593,82 @@ mod tests {
                 },
             },
         );
+        heartbeats.insert("a".to_string(), now);
 
-        assert!(!quorum_valid(&state, &opt).0);
+        assert!(!quorum_compute(now, &heartbeats, &state, &opt).0.is_some());
 
         state.participants.get_mut("a").unwrap().joined =
-            Instant::now().sub(Duration::from_secs(10 * 60 * 60));
+            now.sub(Duration::from_secs(10 * 60 * 60));
 
-        assert!(quorum_valid(&state, &opt).0);
+        assert!(quorum_compute(now, &heartbeats, &state, &opt).0.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_quorum_heartbeats() -> Result<()> {
+        let opt = LighthouseOpt {
+            min_replicas: 1,
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 0,
+            quorum_tick_ms: 10,
+            heartbeat_timeout_ms: 5000,
+        };
+
+        let mut state = RoomState {
+            room_id: "test".to_string(),
+            channel: broadcast::channel(16).0,
+            participants: HashMap::new(),
+            prev_quorum: None,
+            quorum_id: 0,
+        };
+        let mut heartbeats = HashMap::new();
+
+        let now = Instant::now();
+
+        state.participants.insert(
+            "a".to_string(),
+            QuorumMemberDetails {
+                joined: now,
+                member: QuorumMember {
+                    replica_id: "a".to_string(),
+                    address: "".to_string(),
+                    store_address: "".to_string(),
+                    step: 1,
+                    world_size: 1,
+                },
+            },
+        );
+        heartbeats.insert("a".to_string(), now);
+
+        assert!(quorum_compute(now, &heartbeats, &state, &opt).0.is_some());
+
+        // expired heartbeat
+        heartbeats.insert("a".to_string(), now.sub(Duration::from_secs(10)));
+
+        let (quorum_met, reason) = quorum_compute(now, &heartbeats, &state, &opt);
+        assert!(quorum_met.is_none(), "{}", reason);
+
+        // 1 healthy, 1 expired
+        state.participants.insert(
+            "b".to_string(),
+            QuorumMemberDetails {
+                joined: now,
+                member: QuorumMember {
+                    replica_id: "b".to_string(),
+                    address: "".to_string(),
+                    store_address: "".to_string(),
+                    step: 1,
+                    world_size: 1,
+                },
+            },
+        );
+        heartbeats.insert("b".to_string(), now);
+
+        let (quorum_met, reason) = quorum_compute(now, &heartbeats, &state, &opt);
+        assert!(quorum_met.is_some(), "{}", reason);
+        let participants = quorum_met.unwrap();
+        assert!(participants.len() == 1);
 
         Ok(())
     }
@@ -540,6 +680,7 @@ mod tests {
             bind: "[::]:0".to_string(),
             join_timeout_ms: 60 * 60 * 1000, // 1hr
             quorum_tick_ms: 10,
+            heartbeat_timeout_ms: 5000,
         };
 
         let mut state = RoomState {
@@ -549,13 +690,16 @@ mod tests {
             prev_quorum: None,
             quorum_id: 0,
         };
+        let mut heartbeats = HashMap::new();
 
-        assert!(!quorum_valid(&state, &opt).0);
+        let now = Instant::now();
+
+        assert!(!quorum_compute(now, &heartbeats, &state, &opt).0.is_some());
 
         state.participants.insert(
             "a".to_string(),
             QuorumMemberDetails {
-                joined: Instant::now(),
+                joined: now,
                 member: QuorumMember {
                     replica_id: "a".to_string(),
                     address: "".to_string(),
@@ -565,8 +709,9 @@ mod tests {
                 },
             },
         );
+        heartbeats.insert("a".to_string(), now);
 
-        assert!(!quorum_valid(&state, &opt).0);
+        assert!(!quorum_compute(now, &heartbeats, &state, &opt).0.is_some());
 
         state.prev_quorum = Some(Quorum {
             quorum_id: 1,
@@ -580,7 +725,28 @@ mod tests {
             created: Some(SystemTime::now().into()),
         });
 
-        assert!(quorum_valid(&state, &opt).0);
+        assert!(quorum_compute(now, &heartbeats, &state, &opt).0.is_some());
+
+        // test expanding quorum w/ fast quorum
+        state.participants.insert(
+            "b".to_string(),
+            QuorumMemberDetails {
+                joined: now,
+                member: QuorumMember {
+                    replica_id: "b".to_string(),
+                    address: "".to_string(),
+                    store_address: "".to_string(),
+                    step: 1,
+                    world_size: 1,
+                },
+            },
+        );
+        heartbeats.insert("b".to_string(), now);
+
+        let (quorum_met, reason) = quorum_compute(now, &heartbeats, &state, &opt);
+        assert!(quorum_met.is_some(), "{}", reason);
+        let participants = quorum_met.unwrap();
+        assert!(participants.len() == 2);
 
         Ok(())
     }
@@ -592,6 +758,7 @@ mod tests {
             bind: "[::]:0".to_string(),
             join_timeout_ms: 1,
             quorum_tick_ms: 10,
+            heartbeat_timeout_ms: 5000,
         };
         let lighthouse = Lighthouse::new(opt).await?;
 

@@ -101,6 +101,7 @@ class Manager:
         replica_id: Optional[str] = None,
         port: Optional[int] = None,
         hostname: str = socket.gethostname(),
+        heartbeat_interval: timedelta = timedelta(milliseconds=100),
     ) -> None:
         """
         Args:
@@ -177,6 +178,7 @@ class Manager:
                 bind=bind,
                 store_addr=f"{store_addr}:{store_port}",
                 world_size=world_size,
+                heartbeat_interval=heartbeat_interval,
             )
 
             self._store.set(MANAGER_ADDR_KEY, self._manager.address())
@@ -443,6 +445,7 @@ class Manager:
 
             self._logger.info(f"reconfiguring for {quorum_id=} {store_prefixed_addr=}")
             # We use the replica rank and world as we want all replicas in the PG.
+            # TODO: handle configure errors
             self._pg.configure(store_prefixed_addr, replica_rank, replica_world_size)
             self._quorum_id = quorum_id
 

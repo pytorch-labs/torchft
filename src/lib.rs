@@ -45,6 +45,7 @@ impl Manager {
         bind: String,
         store_addr: String,
         world_size: u64,
+        heartbeat_interval: Duration,
     ) -> PyResult<Self> {
         py.allow_threads(move || {
             let runtime = Runtime::new()?;
@@ -56,6 +57,7 @@ impl Manager {
                     bind,
                     store_addr,
                     world_size,
+                    heartbeat_interval,
                 ))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             let handle = runtime.spawn(manager.clone().run());
@@ -228,6 +230,7 @@ struct Lighthouse {
 
 #[pymethods]
 impl Lighthouse {
+    #[pyo3(signature = (bind, min_replicas, join_timeout_ms=None, quorum_tick_ms=None, heartbeat_timeout_ms=None))]
     #[new]
     fn new(
         py: Python<'_>,
@@ -235,9 +238,11 @@ impl Lighthouse {
         min_replicas: u64,
         join_timeout_ms: Option<u64>,
         quorum_tick_ms: Option<u64>,
+        heartbeat_timeout_ms: Option<u64>,
     ) -> PyResult<Self> {
         let join_timeout_ms = join_timeout_ms.unwrap_or(100);
         let quorum_tick_ms = quorum_tick_ms.unwrap_or(100);
+        let heartbeat_timeout_ms = heartbeat_timeout_ms.unwrap_or(5000);
 
         py.allow_threads(move || {
             let rt = Runtime::new()?;
@@ -248,6 +253,7 @@ impl Lighthouse {
                     min_replicas: min_replicas,
                     join_timeout_ms: join_timeout_ms,
                     quorum_tick_ms: quorum_tick_ms,
+                    heartbeat_timeout_ms: heartbeat_timeout_ms,
                 }))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 

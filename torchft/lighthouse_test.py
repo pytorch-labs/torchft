@@ -91,3 +91,11 @@ class TestLighthouse(TestCase):
             lighthouse.shutdown()
             if "manager" in locals():
                 manager.shutdown()
+
+    def test_heartbeat_timeout_ms_sanity(self) -> None:
+        lighthouse = Lighthouse(
+            bind="[::]:0",
+            min_replicas=1,
+            heartbeat_timeout_ms=100,
+        )
+        lighthouse.shutdown()
