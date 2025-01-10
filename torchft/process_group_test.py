@@ -361,7 +361,9 @@ class DeviceMeshTest(TestCase):
             not isinstance(device_mesh.get_group("dp_shard"), ManagedProcessGroup)
         )
         replicate_group = device_mesh.get_group("dp_replicate")
-        testcase.assertEqual(cast(ManagedProcessGroup, replicate_group)._manager, manager)
+        testcase.assertEqual(
+            cast(ManagedProcessGroup, replicate_group)._manager, manager
+        )
         replicate_mesh = device_mesh["dp_replicate"]
         testcase.assertEqual(replicate_mesh.get_group(), replicate_group)
         flatten_mesh = device_mesh._flatten("dp")
