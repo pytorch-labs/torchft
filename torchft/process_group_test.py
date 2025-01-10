@@ -9,7 +9,7 @@ import os
 import unittest
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
-from typing import Any, cast, Dict, Tuple
+from typing import Any, Dict, Tuple, cast
 from unittest import TestCase, skipUnless
 from unittest.mock import Mock
 
