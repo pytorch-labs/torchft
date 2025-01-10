@@ -63,6 +63,7 @@ class FSDPTest(unittest.TestCase):
         shard_model = fully_shard(model, mesh=device_mesh)
         shard_model(batch).mean().backward()
 
+    # pyre-ignore[56]: Pyre was not able to infer the type of argument
     @unittest.skipIf(torch.cuda.device_count() < 4, "Not enough GPUs")
     def test_fsdp(self) -> None:
         multiprocessing.set_start_method("spawn")
