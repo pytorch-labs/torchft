@@ -12,11 +12,12 @@ use std::env;
 use std::sync::Arc;
 
 use anyhow::Result;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 use structopt::StructOpt;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tonic::transport::Channel;
+use tonic::Status;
 
 pub mod torchftpb {
     tonic::include_proto!("torchft");
@@ -102,6 +103,7 @@ impl ManagerClient {
         })
     }
 
+    #[pyo3(signature = (room_id, rank, step, checkpoint_server_addr, timeout=None))]
     fn quorum(
         &mut self,
         py: Python<'_>,
@@ -109,7 +111,8 @@ impl ManagerClient {
         rank: i64,
         step: i64,
         checkpoint_server_addr: String,
-    ) -> PyResult<(i64, i64, i64, String, String, i64, Option<i64>, i64, bool)> {
+        timeout: Option<Duration>,
+    ) -> Result<(i64, i64, i64, String, String, i64, Option<i64>, i64, bool), StatusError> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(ManagerQuorumRequest {
                 room_id: room_id,
@@ -119,12 +122,9 @@ impl ManagerClient {
             });
             // This notifies the server about the timeout but doesn't affect the
             // endpoint timeout which we set on client creation.
-            request.set_timeout(self.timeout);
+            request.set_timeout(timeout.unwrap_or(self.timeout));
 
-            let response = self
-                .runtime
-                .block_on(self.client.quorum(request))
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let response = self.runtime.block_on(self.client.quorum(request))?;
             let resp = response.into_inner();
             Ok((
                 resp.quorum_id,
@@ -140,29 +140,36 @@ impl ManagerClient {
         })
     }
 
-    fn checkpoint_address(&mut self, py: Python<'_>, rank: i64) -> PyResult<String> {
+    #[pyo3(signature = (rank, timeout=None))]
+    fn checkpoint_address(
+        &mut self,
+        py: Python<'_>,
+        rank: i64,
+        timeout: Option<Duration>,
+    ) -> Result<String, StatusError> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(CheckpointAddressRequest { rank: rank });
             // This notifies the server about the timeout but doesn't affect the
             // endpoint timeout which we set on client creation.
-            request.set_timeout(self.timeout);
+            request.set_timeout(timeout.unwrap_or(self.timeout));
 
             let response = self
                 .runtime
-                .block_on(self.client.checkpoint_address(request))
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                .block_on(self.client.checkpoint_address(request))?;
             let resp = response.into_inner();
             Ok(resp.checkpoint_server_address)
         })
     }
 
+    #[pyo3(signature = (rank, step, should_commit, timeout=None))]
     fn should_commit(
         &mut self,
         py: Python<'_>,
         rank: i64,
         step: i64,
         should_commit: bool,
-    ) -> PyResult<bool> {
+        timeout: Option<Duration>,
+    ) -> Result<bool, StatusError> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(ShouldCommitRequest {
                 rank: rank,
@@ -171,12 +178,9 @@ impl ManagerClient {
             });
             // This notifies the server about the timeout but doesn't affect the
             // endpoint timeout which we set on client creation.
-            request.set_timeout(self.timeout);
+            request.set_timeout(timeout.unwrap_or(self.timeout));
 
-            let response = self
-                .runtime
-                .block_on(self.client.should_commit(request))
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let response = self.runtime.block_on(self.client.should_commit(request))?;
             let resp = response.into_inner();
             Ok(resp.should_commit)
         })
@@ -225,7 +229,16 @@ struct Lighthouse {
 #[pymethods]
 impl Lighthouse {
     #[new]
-    fn new(py: Python<'_>, bind: String, min_replicas: u64) -> PyResult<Self> {
+    fn new(
+        py: Python<'_>,
+        bind: String,
+        min_replicas: u64,
+        join_timeout_ms: Option<u64>,
+        quorum_tick_ms: Option<u64>,
+    ) -> PyResult<Self> {
+        let join_timeout_ms = join_timeout_ms.unwrap_or(100);
+        let quorum_tick_ms = quorum_tick_ms.unwrap_or(100);
+
         py.allow_threads(move || {
             let rt = Runtime::new()?;
 
@@ -233,8 +246,8 @@ impl Lighthouse {
                 .block_on(lighthouse::Lighthouse::new(lighthouse::LighthouseOpt {
                     bind: bind,
                     min_replicas: min_replicas,
-                    join_timeout_ms: 100,
-                    quorum_tick_ms: 100,
+                    join_timeout_ms: join_timeout_ms,
+                    quorum_tick_ms: quorum_tick_ms,
                 }))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
@@ -254,6 +267,26 @@ impl Lighthouse {
         py.allow_threads(move || {
             self.handle.abort();
         })
+    }
+}
+
+struct StatusError(Status);
+
+impl From<StatusError> for PyErr {
+    fn from(error: StatusError) -> Self {
+        let code = error.0.code();
+        match code {
+            tonic::Code::Cancelled | tonic::Code::DeadlineExceeded => {
+                PyTimeoutError::new_err(error.0.to_string())
+            }
+            _ => PyRuntimeError::new_err(error.0.to_string()),
+        }
+    }
+}
+
+impl From<Status> for StatusError {
+    fn from(other: Status) -> Self {
+        Self(other)
     }
 }
 

@@ -1,10 +1,11 @@
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from os import sync
-from typing import Callable, Dict, List, Protocol, Set, Tuple
+from datetime import timedelta
+from typing import Dict, Generator, List, Protocol, Set, Tuple
 from unittest import TestCase
 
 import torch
@@ -253,6 +254,15 @@ def local_sgd_train_loop(
 
 
 class ManagerIntegTest(TestCase):
+    @contextmanager
+    def assertElapsedLessThan(
+        self, timeout: float, msg: str = ""
+    ) -> Generator[None, None, None]:
+        start = time.perf_counter()
+        yield
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, timeout, msg)
+
     def test_ddp_healthy(self) -> None:
         lighthouse = Lighthouse(
             bind="[::]:0",
@@ -423,3 +433,48 @@ class ManagerIntegTest(TestCase):
             )
 
         self.assertEqual(failure_injectors[1].count, 1)
+
+    def test_quorum_timeout(self) -> None:
+        with ExitStack() as stack:
+            lighthouse = Lighthouse(
+                bind="[::]:0",
+                min_replicas=2,
+            )
+            stack.callback(lighthouse.shutdown)
+
+            store = dist.TCPStore(
+                host_name="localhost",
+                port=0,
+                is_master=True,
+                wait_for_workers=False,
+            )
+
+            pg = ProcessGroupGloo()
+            manager = Manager(
+                pg=pg,
+                min_replica_size=2,
+                load_state_dict=lambda x: None,
+                state_dict=lambda: None,
+                store_addr="localhost",
+                store_port=store.port,
+                rank=0,
+                world_size=2,
+                lighthouse_addr=lighthouse.address(),
+                port=19530,
+                use_async_quorum=False,
+            )
+            stack.callback(manager.shutdown)
+
+            with self.assertElapsedLessThan(1.0):
+                with self.assertRaisesRegex(
+                    TimeoutError,
+                    "status: Cancelled, message.*Timeout expired",
+                ):
+                    manager.start_quorum(timeout=timedelta(seconds=0.01))
+
+            with self.assertElapsedLessThan(1.0):
+                with self.assertRaisesRegex(
+                    TimeoutError,
+                    "status: Cancelled, message.*Timeout expired",
+                ):
+                    manager.should_commit(timeout=timedelta(seconds=0.01))

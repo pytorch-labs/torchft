@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from torchft.process_group import ProcessGroup
 
 MANAGER_ADDR_KEY: str = "manager_addr"
-MANAGER_DEFAULT_PORT: int = int(os.environ.get("TORCHFT_MANAGER_PORT", 29511))
+MANAGER_PORT_ENV: str = "TORCHFT_MANAGER_PORT"
 REPLICA_ID_KEY: str = "replica_id"
 
 T = TypeVar("T")
@@ -74,6 +74,12 @@ class Manager:
     """
     Manager manages the full fault tolerant training loop.
 
+    This requires the that the TCPStore specified by the store_addr and
+    store_port or MASTER_ADDR and MASTER_PORT environment variables to be
+    started prior to creating this manager. If using a modern version of
+    torchelastic this will already be the case. Otherwise, it should be started
+    via torch.distributed.init_process_group prior to creating this manager.
+
     NOTE: when saving periodic checkpoints you must save and restore the
     Manager's state_dict as well to avoid synchronization issues.
     """
@@ -84,7 +90,6 @@ class Manager:
         load_state_dict: Callable[[T], None],
         state_dict: Callable[[], T],
         min_replica_size: int,
-        port: int = MANAGER_DEFAULT_PORT,
         use_async_quorum: bool = True,
         timeout: timedelta = timedelta(seconds=60),
         rank: Optional[int] = None,
@@ -94,15 +99,23 @@ class Manager:
         store_port: Optional[int] = None,
         lighthouse_addr: Optional[str] = None,
         replica_id: Optional[str] = None,
+        port: Optional[int] = None,
     ) -> None:
         """
         Args:
             load_state_dict: function to load the state dict when recovering
             state_dict: function to save the state dict with recovering
             min_replica_size: minimum number of replicas on each step
-            port: if rank==0, the port to run the manager server on
+            port: if rank==0, the port to run the manager server on.
+                Port assignment priority:
+                1. this argument
+                2. TORCHFT_MANAGER_PORT env var
+                3. arbitrary port assigned via 0
             use_async_quorum: whether to run the quorum asynchronously during the forward pass
-            timeout: timeout for all operations
+            timeout:
+                the default timeout for all operation, if you're using per
+                request timeouts this should be longer than the longest request
+                timeout.
             rank: the replica group local rank
             world_size: the replica group local world size
             store_addr: TCPStore address for this replica group
@@ -147,6 +160,10 @@ class Manager:
 
         if rank == 0:
             hostname = socket.gethostname()
+
+            if port is None:
+                port = int(os.environ.get(MANAGER_PORT_ENV, 0))
+
             addr = f"http://{hostname}:{port}"
             bind = f"[::]:{port}"
             lighthouse_addr = lighthouse_addr or os.environ["TORCHFT_LIGHTHOUSE"]
@@ -163,7 +180,7 @@ class Manager:
                 world_size=world_size,
             )
 
-            self._store.set(MANAGER_ADDR_KEY, addr)
+            self._store.set(MANAGER_ADDR_KEY, self._manager.address())
             self._store.set(REPLICA_ID_KEY, replica_id)
 
         addr = self._store.get(MANAGER_ADDR_KEY).decode("utf-8")
@@ -274,12 +291,15 @@ class Manager:
         Get whether an error has occurred.
 
         Returns:
-            The error or None if no error has occured.
+            The error or None if no error has occurred.
         """
         return self._errored
 
     def wrap_future(
-        self, fut: torch.futures.Future[T], default: T
+        self,
+        fut: torch.futures.Future[T],
+        default: T,
+        timeout: Optional[timedelta] = None,
     ) -> torch.futures.Future[T]:
         """
         Wrap a Future and swallow any errors that occur and report them to the manager.
@@ -289,10 +309,11 @@ class Manager:
         Args:
             fut: the Future to wrap
             default: the default value to complete the Future with if an error occurs
+            timeout: the timeout for the Future, if None, the manager's timeout will be used
         """
 
         # add a timeout to the future
-        fut = future_timeout(fut, self._timeout)
+        fut = future_timeout(fut, timeout or self._timeout)
 
         # schedule error handling as a continuation on the Future
         def callback(
@@ -313,7 +334,12 @@ class Manager:
         self._pending_work.append(cast(torch.futures.Future[object], fut))
         return fut
 
-    def start_quorum(self, room_id: str = "default", allow_heal: bool = True) -> None:
+    def start_quorum(
+        self,
+        room_id: str = "default",
+        allow_heal: bool = True,
+        timeout: Optional[timedelta] = None,
+    ) -> None:
         """
         .. note::
             We recommend using the :py:class:`torchft.optim.OptimizerWrapper` instead of calling this directly.
@@ -331,6 +357,7 @@ class Manager:
                 calls. All replicas must pass the same value to allow_heal.
             room_id: (experimental) the room id to use for quorum, this allows
                 for multiple quorums to be used within the same job.
+            timeout: the timeout for quorum and recovery operations, if None, the manager's timeout will be used
         """
 
         # wait for previous quorum to complete
@@ -345,7 +372,10 @@ class Manager:
         # block to allow gracefully recovering from issues in PG setup and quorum.
 
         self._quorum_future = self._executor.submit(
-            self._async_quorum, room_id=room_id, allow_heal=allow_heal
+            self._async_quorum,
+            room_id=room_id,
+            allow_heal=allow_heal,
+            timeout=timeout or self._timeout,
         )
         if not self._use_async_quorum:
             self.wait_quorum()
@@ -369,7 +399,7 @@ class Manager:
         ), "must call start_quorum before wait_quorum"
         self._quorum_future.result()
 
-    def _async_quorum(self, room_id: str, allow_heal: bool) -> None:
+    def _async_quorum(self, room_id: str, allow_heal: bool, timeout: timedelta) -> None:
         (
             quorum_id,
             replica_rank,
@@ -385,6 +415,7 @@ class Manager:
             rank=self._rank,
             step=self._step,
             checkpoint_server_addr=self._ckpt_server.address(),
+            timeout=timeout,
         )
 
         # When using async quorum we need to take the recovered workers.
@@ -422,8 +453,10 @@ class Manager:
             self._logger.info(
                 f"healing required, fetching checkpoint server address from {address=} {max_step=}"
             )
-            primary_client = ManagerClient(address, timeout=self._timeout)
-            checkpoint_server_address = primary_client.checkpoint_address(self._rank)
+            primary_client = ManagerClient(address, timeout=timeout)
+            checkpoint_server_address = primary_client.checkpoint_address(
+                self._rank, timeout=timeout
+            )
 
             self._logger.info(f"fetching checkpoint from {checkpoint_server_address=}")
             self._pending_state_dict = CheckpointServer.load_from_address(
@@ -449,7 +482,7 @@ class Manager:
         self._load_state_dict(self._pending_state_dict["user"])
         self._pending_state_dict = None
 
-    def should_commit(self) -> bool:
+    def should_commit(self, timeout: Optional[timedelta] = None) -> bool:
         """
         .. note::
             We recommend using the :py:class:`torchft.optim.OptimizerWrapper` instead of calling this directly.
@@ -486,7 +519,10 @@ class Manager:
         enough_replicas = self.num_participants() >= self._min_replica_size
         local_should_commit = enough_replicas and self._errored is None
         should_commit = self._client.should_commit(
-            self._rank, self._step, local_should_commit
+            self._rank,
+            self._step,
+            local_should_commit,
+            timeout=timeout or self._timeout,
         )
         self._logger.info(
             f"should_commit={should_commit} enough_replicas={enough_replicas}, errored={self._errored}"

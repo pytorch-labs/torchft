@@ -16,6 +16,12 @@ from torchft.process_group import ProcessGroup, _DummyWork
 from torchft.torchft import ManagerClient
 
 
+def mock_should_commit(
+    rank: int, step: int, should_commit: bool, timeout: timedelta
+) -> bool:
+    return should_commit
+
+
 class TestManager(TestCase):
     store: TCPStore  # pyre-fixme[13]: never initialized
     load_state_dict: MagicMock  # pyre-fixme[13]: never initialized
@@ -84,7 +90,7 @@ class TestManager(TestCase):
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_quorum_happy(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
-        client_mock().should_commit = lambda rank, step, should_commit: should_commit
+        client_mock().should_commit = mock_should_commit
 
         client_mock().quorum.return_value = (
             123,  # quorum_id
@@ -119,7 +125,7 @@ class TestManager(TestCase):
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_quorum_heal_sync(self, client_mock: MagicMock) -> None:
         manager = self._create_manager(use_async_quorum=False)
-        client_mock().should_commit = lambda rank, step, should_commit: should_commit
+        client_mock().should_commit = mock_should_commit
 
         client_mock().quorum.return_value = (
             123,  # quorum_id
@@ -132,7 +138,7 @@ class TestManager(TestCase):
             2,  # max_world_size
             True,  # heal
         )
-        # forceable increment checkpoint server to compute correct address
+        # forcible increment checkpoint server to compute correct address
         manager._ckpt_server.allow_checkpoint(manager.current_step())
 
         client_mock().checkpoint_address.return_value = manager._ckpt_server.address()
@@ -161,7 +167,7 @@ class TestManager(TestCase):
         self, client_mock: MagicMock
     ) -> None:
         manager = self._create_manager(use_async_quorum=True, min_replica_size=2)
-        client_mock().should_commit = lambda rank, step, should_commit: should_commit
+        client_mock().should_commit = mock_should_commit
 
         client_mock().quorum.return_value = (
             123,  # quorum_id
@@ -174,7 +180,7 @@ class TestManager(TestCase):
             1,  # max_world_size
             True,  # heal
         )
-        # forceable increment checkpoint server to compute correct address
+        # forcible increment checkpoint server to compute correct address
         manager._ckpt_server.allow_checkpoint(manager.current_step())
 
         client_mock().checkpoint_address.return_value = manager._ckpt_server.address()
@@ -213,7 +219,7 @@ class TestManager(TestCase):
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_quorum_heal_async_zero_grad(self, client_mock: MagicMock) -> None:
         manager = self._create_manager(use_async_quorum=True, min_replica_size=1)
-        client_mock().should_commit = lambda rank, step, should_commit: should_commit
+        client_mock().should_commit = mock_should_commit
 
         client_mock().quorum.return_value = (
             123,  # quorum_id
@@ -262,7 +268,7 @@ class TestManager(TestCase):
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_allreduce_error(self, client_mock: MagicMock) -> None:
         manager = self._create_manager()
-        client_mock().should_commit = lambda rank, step, should_commit: should_commit
+        client_mock().should_commit = mock_should_commit
 
         client_mock().quorum.return_value = (
             123,  # quorum_id
@@ -354,9 +360,7 @@ class TestManager(TestCase):
                 min_replica_size=2,
                 world_size_mode=WorldSizeMode.FIXED_WITH_SPARES,
             )
-            client_mock().should_commit = (
-                lambda rank, step, should_commit: should_commit
-            )
+            client_mock().should_commit = mock_should_commit
 
             client_mock().quorum.return_value = (
                 123,  # quorum_id
@@ -389,7 +393,7 @@ class TestManager(TestCase):
         manager = self._create_manager(
             min_replica_size=2,
         )
-        client_mock().should_commit = lambda rank, step, should_commit: should_commit
+        client_mock().should_commit = mock_should_commit
 
         client_mock().quorum.return_value = (
             123,  # quorum_id
@@ -483,3 +487,30 @@ class TestManager(TestCase):
         fut = manager.allreduce(torch.tensor([1.0]))
         result = fut.value()
         torch.testing.assert_close(result, torch.tensor([0.0]))
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_quorum_happy_timeouts(self, client_mock: MagicMock) -> None:
+        manager = self._create_manager(use_async_quorum=False)
+
+        client_mock().quorum.return_value = (
+            123,  # quorum_id
+            1,  # replica_rank
+            2,  # replica_world
+            "manager address",
+            f"localhost:{self.store.port}",
+            1,  # max_step
+            1,  # max_rank
+            2,  # max_world_size
+            False,  # heal
+        )
+
+        manager.start_quorum(timeout=timedelta(seconds=12))
+        self.assertEqual(
+            client_mock().quorum.call_args.kwargs["timeout"], timedelta(seconds=12)
+        )
+
+        self.assertTrue(manager.should_commit(timeout=timedelta(seconds=23)))
+        self.assertEqual(
+            client_mock().should_commit.call_args.kwargs["timeout"],
+            timedelta(seconds=23),
+        )

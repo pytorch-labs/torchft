@@ -17,10 +17,11 @@ runtime users need to take care to not assume a static rank or world size.
 """
 
 import logging
+import queue
 import threading
 from abc import ABC
 from datetime import timedelta
-from typing import TYPE_CHECKING, Dict, List, Optional, Type
+from typing import TYPE_CHECKING, Dict, List, Optional, Type, Union
 
 import torch
 import torch.distributed as dist
@@ -53,8 +54,23 @@ _FUTURE_RESULT = "fut_result"
 _FUTURE_EXCEPTION = "fut_exception"
 
 
-def _get(queue: mp.Queue, timeout: float) -> object:
-    v = queue.get(timeout=timeout)
+def _get(q: mp.Queue, timeout: Union[float, timedelta]) -> object:
+    """
+    Gets an item from a queue with a timeout. If the timeout is exceeded then
+    a TimeoutError is raised.
+
+    If an exception is returned from the queue then it is raised.
+
+    Args:
+        q: queue to get from
+        timeout: timeout in seconds
+    """
+    if isinstance(timeout, timedelta):
+        timeout = timeout.total_seconds()
+    try:
+        v = q.get(timeout=timeout)
+    except queue.Empty as e:
+        raise TimeoutError(f"queue.get() timed out after {timeout} seconds") from e
     if isinstance(v, Exception):
         raise v
     return v
@@ -94,6 +110,9 @@ class ProcessGroup(BaseProcessGroup):
 
         Every time this is called it must be provided with a unique prefixed
         store address. I.e. localhost:1234/my/prefix/1
+
+        This function will block until the underlying ProcessGroup is created.
+        If an error occurs this will throw.
 
         Args:
             store_addr: address of the store to use
@@ -187,7 +206,6 @@ class ProcessGroup(BaseProcessGroup):
 
 
 class ProcessGroupWrapper(ProcessGroup):
-    PG_CLASS: Type[BaseProcessGroup]  # pyre-fixme[13]: never initialized
     """
     This is a wrapper around any ProcessGroup with a reconfiguration method.
     """
@@ -209,9 +227,10 @@ class ProcessGroupWrapper(ProcessGroup):
 
         store = create_store_client(store_addr)
 
-        # TODO: set global timeout
-        # pyre-fixme[20]: expects argument options
-        self._pg = self.PG_CLASS(store, rank, world_size)
+        self._pg = self._create_pg(store, rank, world_size)
+
+    def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
+        raise NotImplementedError("not implemented")
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
         return self.parent.allreduce(tensors, opts)
@@ -244,9 +263,13 @@ class ProcessGroupGloo(ProcessGroupWrapper):
     This is a reconfigurable version of ProcessGroupGloo.
     """
 
-    PG_CLASS: Type[BaseProcessGroup] = (
-        BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
-    )
+    def __init__(self, timeout: timedelta = timedelta(seconds=60.0)) -> None:
+        super().__init__()
+        self._timeout = timeout
+
+    def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
+        # pyre-fixme[16]: no attribute ProcessGroupGloo
+        return BaseProcessGroupGloo(store, rank, world_size, self._timeout)
 
     def getBackendName(self) -> str:
         return "torchft-gloo"
@@ -263,9 +286,9 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
     abort when reconfiguring, we need to ensure this is safe.
     """
 
-    PG_CLASS: Type[BaseProcessGroup] = (
-        BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
-    )
+    def _create_pg(self, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
+        # pyre-fixme[16]: no attribute ProcessGroupNCCL
+        return BaseProcessGroupNCCL(store, rank, world_size)
 
     def getBackendName(self) -> str:
         return "torchft-nccl"
@@ -546,10 +569,9 @@ class ProcessGroupBaby(ProcessGroup):
 
     """
 
-    PG_CLASS: Type[BaseProcessGroup]  # pyre-fixme[13]: never initialized
     WORK_CLASS: Type[_BabyWork] = _BabyWork
 
-    def __init__(self, timeout: float = 60.0) -> None:
+    def __init__(self, timeout: Union[float, timedelta] = 60.0) -> None:
         super().__init__(0, 1)
 
         self._world_size = -1
@@ -562,7 +584,10 @@ class ProcessGroupBaby(ProcessGroup):
         self._futures: Dict[int, Future[object]] = {}
         self._futures_lock = threading.Lock()
 
-        self._timeout = timeout
+        if isinstance(timeout, timedelta):
+            timeout = timeout.total_seconds()
+
+        self._timeout: float = timeout
 
     def configure(self, store_addr: str, rank: int, world_size: int) -> None:
         if self._p is not None:
@@ -581,7 +606,7 @@ class ProcessGroupBaby(ProcessGroup):
 
         ctx = mp.get_context("spawn")
         self._tx = ctx.Queue()
-        self._rx = ctx.Queue()
+        self._rx = rx = ctx.Queue()
 
         # futures need thread to fire callbacks
         self._future_queue = ctx.Queue()
@@ -602,6 +627,17 @@ class ProcessGroupBaby(ProcessGroup):
         )
         self._p.start()
 
+        # fetch the status of the PG init
+        # if an exception was returned _get will throw
+        assert _get(rx, self._timeout) is None
+
+    @classmethod
+    def _create_pg(cls, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
+        """
+        This is a class method to avoid pickling the class.
+        """
+        raise NotImplementedError("not implemented")
+
     @classmethod
     def _worker(
         cls,
@@ -615,8 +651,13 @@ class ProcessGroupBaby(ProcessGroup):
         try:
             store = create_store_client(store_addr)
 
-            # pyre-fixme[20]: expects argument options
-            pg = cls.PG_CLASS(store, rank, world_size)
+            try:
+                pg = cls._create_pg(store, rank, world_size)
+            except Exception as e:
+                logger.exception(f"got exception in worker: {e}")
+                tx.put(e)
+                return
+            tx.put(None)
 
             work = {}
             next_op_id: int = 0
@@ -737,9 +778,10 @@ class ProcessGroupBabyGloo(ProcessGroupBaby):
     ProcessGroupBabyNCCL.
     """
 
-    PG_CLASS: Type[BaseProcessGroup] = (
-        BaseProcessGroupGloo  # pyre-fixme[16]: no attribute ProcessGroupGloo
-    )
+    @classmethod
+    def _create_pg(cls, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
+        # pyre-fixme[16]: no attribute ProcessGroupGloo
+        return BaseProcessGroupGloo(store, rank, world_size)
 
     def getBackendName(self) -> str:
         return "torchft-baby-gloo"
@@ -761,10 +803,12 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
     tensors may leak in the current PyTorch implementation. TODO fix
     """
 
-    PG_CLASS: Type[BaseProcessGroup] = (
-        BaseProcessGroupNCCL  # pyre-fixme[16]: no attribute ProcessGroupNCCL
-    )
     WORK_CLASS = _BabyWorkNCCL
+
+    @classmethod
+    def _create_pg(cls, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
+        # pyre-fixme[16]: no attribute ProcessGroupNCCL
+        return BaseProcessGroupNCCL(store, rank, world_size)
 
     def getBackendName(self) -> str:
         return "torchft-baby-nccl"
