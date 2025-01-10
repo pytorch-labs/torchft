@@ -41,7 +41,7 @@ impl Manager {
         py: Python<'_>,
         replica_id: String,
         lighthouse_addr: String,
-        address: String,
+        hostname: String,
         bind: String,
         store_addr: String,
         world_size: u64,
@@ -52,7 +52,7 @@ impl Manager {
                 .block_on(manager::Manager::new(
                     replica_id,
                     lighthouse_addr,
-                    address,
+                    hostname,
                     bind,
                     store_addr,
                     world_size,

@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use gethostname::gethostname;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -53,7 +52,7 @@ struct ManagerState {
 pub struct Manager {
     replica_id: String,
     lighthouse_addr: String,
-    address: String,
+    hostname: String,
     store_address: String,
     world_size: u64,
     state: Mutex<ManagerState>,
@@ -80,19 +79,20 @@ impl Manager {
     pub async fn new(
         replica_id: String,
         lighthouse_addr: String,
-        address: String,
+        hostname: String,
         bind: String,
         store_addr: String,
         world_size: u64,
     ) -> Result<Arc<Self>> {
         let listener = tokio::net::TcpListener::bind(&bind).await?;
+        let local_addr = listener.local_addr()?;
 
         let (should_commit_tx, _) = broadcast::channel(16);
 
         Ok(Arc::new(Self {
             replica_id: replica_id,
             lighthouse_addr: lighthouse_addr,
-            address: address,
+            hostname: hostname,
             store_address: store_addr,
             world_size: world_size,
             state: Mutex::new(ManagerState {
@@ -103,7 +103,7 @@ impl Manager {
                 should_commit_count: HashSet::new(),
                 should_commit_failures: HashSet::new(),
             }),
-            local_addr: listener.local_addr()?,
+            local_addr: local_addr,
             listener: Mutex::new(Some(listener)),
         }))
     }
@@ -122,11 +122,7 @@ impl Manager {
     }
 
     pub fn address(&self) -> String {
-        format!(
-            "http://{}:{}",
-            gethostname().into_string().unwrap(),
-            self.local_addr.port()
-        )
+        format!("http://{}:{}", self.hostname, self.local_addr.port())
     }
 
     async fn _run_grpc(self: Arc<Self>) -> Result<()> {
@@ -228,7 +224,7 @@ impl ManagerService for Arc<Manager> {
                     room_id: room_id.clone(),
                     requester: Some(QuorumMember {
                         replica_id: self.replica_id.clone(),
-                        address: self.address.clone(),
+                        address: self.address(),
                         store_address: self.store_address.clone(),
                         step: req.step,
                         world_size: self.world_size,
@@ -470,7 +466,7 @@ mod tests {
         let manager = Manager::new(
             "rep_id".to_string(),
             lighthouse.address(),
-            "addr".to_string(),
+            "localhost".to_string(),
             "[::]:0".to_string(),
             "store_addr".to_string(),
             1, // world size
@@ -493,7 +489,7 @@ mod tests {
         lighthouse_fut.abort();
 
         assert_eq!(resp.quorum_id, 1);
-        assert_eq!(resp.address, "addr".to_string());
+        assert_eq!(resp.address, manager.address());
         assert_eq!(resp.store_address, "store_addr".to_string());
         assert_eq!(resp.max_step, 123);
         assert_eq!(resp.max_rank, Some(0));
@@ -525,7 +521,7 @@ mod tests {
                 let manager = Manager::new(
                     format!("rep_{}", replica_id),
                     lighthouse_addr,
-                    "addr".to_string(),
+                    "localhost".to_string(),
                     "[::]:0".to_string(),
                     "store_addr".to_string(),
                     1, // world size

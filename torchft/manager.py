@@ -100,6 +100,7 @@ class Manager:
         lighthouse_addr: Optional[str] = None,
         replica_id: Optional[str] = None,
         port: Optional[int] = None,
+        hostname: str = socket.gethostname(),
     ) -> None:
         """
         Args:
@@ -122,6 +123,7 @@ class Manager:
             store_port: TCPStore port for this replica group
             lighthouse_addr: if rank==0, the address of the lighthouse server
             replica_id: if rank==0, the replica_id for this group
+            hostname: if rank==0, the hostname to advertise to the lighthouse server
         """
         self._load_state_dict = load_state_dict
         self._state_dict = state_dict
@@ -159,12 +161,9 @@ class Manager:
         self._manager: Optional[_Manager] = None
 
         if rank == 0:
-            hostname = socket.gethostname()
-
             if port is None:
                 port = int(os.environ.get(MANAGER_PORT_ENV, 0))
 
-            addr = f"http://{hostname}:{port}"
             bind = f"[::]:{port}"
             lighthouse_addr = lighthouse_addr or os.environ["TORCHFT_LIGHTHOUSE"]
 
@@ -174,7 +173,7 @@ class Manager:
             self._manager = _Manager(
                 replica_id=replica_id,
                 lighthouse_addr=lighthouse_addr,
-                address=addr,
+                hostname=hostname,
                 bind=bind,
                 store_addr=f"{store_addr}:{store_port}",
                 world_size=world_size,

@@ -27,7 +27,7 @@ class Manager:
         self,
         replica_id: str,
         lighthouse_addr: str,
-        address: str,
+        hostname: str,
         bind: str,
         store_addr: str,
         world_size: int,
@@ -36,6 +36,12 @@ class Manager:
     def shutdown(self) -> None: ...
 
 class Lighthouse:
-    def __init__(self, bind: str, min_replicas: int, join_timeout_ms: Optional[int] = None, quorum_tick_ms: Optional[int] = None) -> None: ...
+    def __init__(
+        self,
+        bind: str,
+        min_replicas: int,
+        join_timeout_ms: Optional[int] = None,
+        quorum_tick_ms: Optional[int] = None,
+    ) -> None: ...
     def address(self) -> str: ...
     def shutdown(self) -> None: ...
