@@ -5,7 +5,6 @@ class ManagerClient:
     def __init__(self, addr: str, timeout: timedelta) -> None: ...
     def quorum(
         self,
-        room_id: str,
         rank: int,
         step: int,
         checkpoint_server_addr: str,

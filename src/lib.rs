@@ -105,11 +105,10 @@ impl ManagerClient {
         })
     }
 
-    #[pyo3(signature = (room_id, rank, step, checkpoint_server_addr, timeout=None))]
+    #[pyo3(signature = (rank, step, checkpoint_server_addr, timeout=None))]
     fn quorum(
         &mut self,
         py: Python<'_>,
-        room_id: String,
         rank: i64,
         step: i64,
         checkpoint_server_addr: String,
@@ -117,7 +116,6 @@ impl ManagerClient {
     ) -> Result<(i64, i64, i64, String, String, i64, Option<i64>, i64, bool), StatusError> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(ManagerQuorumRequest {
-                room_id: room_id,
                 rank: rank,
                 step: step,
                 checkpoint_server_addr: checkpoint_server_addr,

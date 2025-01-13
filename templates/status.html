@@ -1,12 +1,9 @@
 
-{% for room in rooms %}
-<h2>Room Status: {{room.room_id}}</h2>
-
-Current quorum_id: {{room.quorum_id}} <br>
-Next quorum status: {{room.quorum_status}}
+Current quorum_id: {{quorum_id}} <br>
+Next quorum status: {{quorum_status}}
 
 <h3>Previous Quorum</h3>
-{% if let Some(prev_quorum) = room.prev_quorum %}
+{% if let Some(prev_quorum) = prev_quorum %}
 
 Previous quorum id: {{prev_quorum.quorum_id}} <br>
 Quorum age:
@@ -16,7 +13,7 @@ Quorum age:
 {% for member in prev_quorum.participants %}
 
 <div class="member
- {% if member.step != room.max_step %}recovering{% endif %}
+ {% if member.step != max_step %}recovering{% endif %}
 ">
   <b>{{ member.replica_id }}</b> <br/>
   Step: {{ member.step }} <br/>
@@ -34,8 +31,6 @@ Quorum age:
 </div>
 
 {% endif %}
-
-{% endfor %}
 
 <h2>Heartbeats</h2>
 

@@ -35,14 +35,10 @@ use log::{info, warn};
 #[cfg(test)]
 use std::{println as info, println as warn};
 
-struct RoomState {
-    channel: broadcast::Sender<Quorum>,
-    participants: HashSet<i64>,
-}
-
 struct ManagerState {
     checkpoint_servers: HashMap<i64, String>,
-    rooms: HashMap<String, RoomState>,
+    channel: broadcast::Sender<Quorum>,
+    participants: HashSet<i64>,
 
     should_commit_channel: broadcast::Sender<bool>,
     should_commit_failures: HashSet<i64>,
@@ -90,6 +86,7 @@ impl Manager {
         let local_addr = listener.local_addr()?;
 
         let (should_commit_tx, _) = broadcast::channel(16);
+        let (tx, _) = broadcast::channel(16);
 
         Ok(Arc::new(Self {
             replica_id: replica_id,
@@ -100,7 +97,8 @@ impl Manager {
             heartbeat_interval: heartbeat_interval,
             state: Mutex::new(ManagerState {
                 checkpoint_servers: HashMap::new(),
-                rooms: HashMap::new(),
+                channel: tx,
+                participants: HashSet::new(),
 
                 should_commit_channel: should_commit_tx,
                 should_commit_count: HashSet::new(),
@@ -181,9 +179,8 @@ impl ManagerService for Arc<Manager> {
     ) -> Result<Response<ManagerQuorumResponse>, Status> {
         let req = request.get_ref();
         let rank = req.rank;
-        let room_id = &req.room_id;
 
-        info!("{}: got quorum request for rank {}", room_id, rank);
+        info!("got quorum request for rank {}", rank);
 
         let mut rx = {
             let mut state = self.state.lock().await;
@@ -194,27 +191,13 @@ impl ManagerService for Arc<Manager> {
                 .checkpoint_servers
                 .insert(req.rank, req.checkpoint_server_addr.clone());
 
-            if !state.rooms.contains_key(room_id) {
-                let (tx, _) = broadcast::channel(16);
-
-                state.rooms.insert(
-                    room_id.clone(),
-                    RoomState {
-                        channel: tx,
-                        participants: HashSet::new(),
-                    },
-                );
-            }
-
-            let room = state.rooms.get_mut(room_id).unwrap();
-
             // TODO check step
-            room.participants.insert(rank);
-            let rx = room.channel.subscribe();
+            state.participants.insert(rank);
+            let rx = state.channel.subscribe();
 
-            if room.participants.len() as u64 >= self.world_size {
-                room.participants.clear();
-                info!("{}: all workers joined -- starting quorum", room_id);
+            if state.participants.len() as u64 >= self.world_size {
+                state.participants.clear();
+                info!("all workers joined -- starting quorum");
 
                 // TODO: don't hold the lock during quorum
 
@@ -224,7 +207,6 @@ impl ManagerService for Arc<Manager> {
                     .map_err(|e| Status::from_error(e.into()))?;
 
                 let mut lighthouse_request = tonic::Request::new(LighthouseQuorumRequest {
-                    room_id: room_id.clone(),
                     requester: Some(QuorumMember {
                         replica_id: self.replica_id.clone(),
                         address: self.address(),
@@ -246,9 +228,10 @@ impl ManagerService for Arc<Manager> {
                 let response = client.quorum(lighthouse_request).await.unwrap();
                 let resp = response.into_inner();
 
-                info!("{}: got lighthouse quorum {:?}", room_id, resp);
+                info!("got lighthouse quorum {:?}", resp);
 
-                room.channel
+                state
+                    .channel
                     .send(
                         resp.quorum
                             .ok_or_else(|| Status::internal("missing quorum"))?,
@@ -295,8 +278,8 @@ impl ManagerService for Arc<Manager> {
         let heal = max_step != req.step || max_step == 0 && primary.replica_id != self.replica_id;
         if heal {
             info!(
-                "{}: healing is required step={}, max_step={}",
-                room_id, req.step, max_step
+                "healing is required step={}, max_step={}",
+                req.step, max_step
             );
         }
 
@@ -313,7 +296,7 @@ impl ManagerService for Arc<Manager> {
             heal: heal,
         };
 
-        info!("{}: returning quorum for rank {}", room_id, rank);
+        info!("returning quorum for rank {}", rank);
 
         Ok(Response::new(reply))
     }
@@ -483,7 +466,6 @@ mod tests {
         let mut client = manager_client_new(manager.address(), Duration::from_secs(10)).await?;
 
         let mut request = tonic::Request::new(ManagerQuorumRequest {
-            room_id: "room".to_string(),
             rank: 0,
             step: 123,
             checkpoint_server_addr: "addr".to_string(),
@@ -541,7 +523,6 @@ mod tests {
                     manager_client_new(manager.address(), Duration::from_secs(10)).await?;
 
                 let mut request = tonic::Request::new(ManagerQuorumRequest {
-                    room_id: "room".to_string(),
                     rank: 0,
                     step: 0,
                     checkpoint_server_addr: "addr".to_string(),

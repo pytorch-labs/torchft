@@ -337,7 +337,6 @@ class Manager:
 
     def start_quorum(
         self,
-        room_id: str = "default",
         allow_heal: bool = True,
         timeout: Optional[timedelta] = None,
     ) -> None:
@@ -356,8 +355,6 @@ class Manager:
                 If allow_heal is set, the manager will attempt to heal either
                 synchronously before returning or asynchronously prior to any network
                 calls. All replicas must pass the same value to allow_heal.
-            room_id: (experimental) the room id to use for quorum, this allows
-                for multiple quorums to be used within the same job.
             timeout: the timeout for quorum and recovery operations, if None, the manager's timeout will be used
         """
 
@@ -374,7 +371,6 @@ class Manager:
 
         self._quorum_future = self._executor.submit(
             self._async_quorum,
-            room_id=room_id,
             allow_heal=allow_heal,
             timeout=timeout or self._timeout,
         )
@@ -400,7 +396,7 @@ class Manager:
         ), "must call start_quorum before wait_quorum"
         self._quorum_future.result()
 
-    def _async_quorum(self, room_id: str, allow_heal: bool, timeout: timedelta) -> None:
+    def _async_quorum(self, allow_heal: bool, timeout: timedelta) -> None:
         (
             quorum_id,
             replica_rank,
@@ -412,7 +408,6 @@ class Manager:
             max_world_size,
             heal,
         ) = self._client.quorum(
-            room_id=room_id,
             rank=self._rank,
             step=self._step,
             checkpoint_server_addr=self._ckpt_server.address(),
