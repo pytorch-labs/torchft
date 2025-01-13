@@ -609,8 +609,14 @@ class ProcessGroupBaby(ProcessGroup):
         if self._rx is not None:
             self._rx.close()
         if self._future_queue is not None:
+            # wait for the future thread to exit and then close the queue
             self._future_queue.put(_QUEUE_CLOSE)
-            assert self._future_queue is not None
+            assert self._future_thread is not None
+            self._future_thread.join(timeout=10.0)
+            # pyre-ignore[16]: optional value is checked above
+            if self._future_thread.is_alive():
+                raise RuntimeError("future thread did not exit")
+            # pyre-ignore[16]: optional value is checked above
             self._future_queue.close()
 
         ctx = mp.get_context("spawn")

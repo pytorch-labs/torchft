@@ -210,6 +210,42 @@ class ProcessGroupTest(TestCase):
         with self.assertRaisesRegex(TimeoutError, "timed out after 0.01 seconds"):
             a.configure(store_addr, 0, 2)
 
+    def test_reconfigure_baby_process_group(self) -> None:
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+        store_addr = f"localhost:{store.port}/prefix"
+
+        a = ProcessGroupBabyGloo()
+        a.configure(store_addr, 0, 1)
+        future_thread_1 = a._future_thread
+        future_queue_1 = a._future_queue
+        p_1 = a._p
+
+        store_addr = f"localhost:{store.port}/prefix2"
+        a.configure(store_addr, 0, 1)
+        future_thread_2 = a._future_thread
+        future_queue_2 = a._future_queue
+        p_2 = a._p
+
+        self.assertNotEqual(future_thread_1, future_thread_2)
+        self.assertNotEqual(future_queue_1, future_queue_2)
+        self.assertNotEqual(p_1, p_2)
+
+        assert future_thread_1 is not None
+        self.assertFalse(future_thread_1.is_alive())
+        assert future_queue_1 is not None
+        self.assertTrue(future_queue_1._closed)  # pyre-ignore[16]: no attribute _closed
+        assert p_1 is not None
+        self.assertFalse(p_1.is_alive())
+
+        assert future_thread_2 is not None
+        self.assertTrue(future_thread_2.is_alive())
+        assert future_queue_2 is not None
+        self.assertFalse(future_queue_2._closed)
+        assert p_2 is not None
+        self.assertTrue(p_2.is_alive())
+
     def test_dummy(self) -> None:
         pg = ProcessGroupDummy(0, 1)
         m = nn.Linear(3, 4)
