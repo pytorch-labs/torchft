@@ -8,6 +8,7 @@ class ManagerClient:
         rank: int,
         step: int,
         checkpoint_server_addr: str,
+        shrink_only: bool,
         timeout: Optional[timedelta] = None,
     ) -> Tuple[int, int, int, str, str, int, Optional[int], int, bool]: ...
     def checkpoint_address(

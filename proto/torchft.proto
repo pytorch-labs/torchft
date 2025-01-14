@@ -41,6 +41,7 @@ message QuorumMember {
     string store_address = 3;
     int64 step = 4;
     uint64 world_size = 5;
+    bool shrink_only = 6;
 }
 
 message Quorum {
@@ -72,6 +73,7 @@ message ManagerQuorumRequest {
     int64 rank = 1;
     int64 step = 2;
     string checkpoint_server_addr = 3;
+    bool shrink_only = 4;
 }
 
 message ManagerQuorumResponse {

@@ -6,6 +6,7 @@
 
 use core::net::SocketAddr;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::{Instant, SystemTime};
@@ -115,19 +116,21 @@ fn quorum_compute(
     opt: &LighthouseOpt,
 ) -> (Option<Vec<QuorumMember>>, String) {
     let heartbeats = &state.heartbeats;
-    let healthy_participants: HashMap<String, QuorumMemberDetails> = state
-        .participants
-        .clone()
-        .into_iter()
-        .filter(|(replica_id, _details)| {
-            let last_heartbeat = heartbeats.get(replica_id);
-            if last_heartbeat.is_none() {
-                return false;
+    let healthy_replicas: HashSet<&String> = heartbeats
+        .iter()
+        .filter_map(|(replica_id, last_heartbeat)| {
+            if now.duration_since(*last_heartbeat) < Duration::from_millis(opt.heartbeat_timeout_ms)
+            {
+                return Some(replica_id);
             }
-
-            now.duration_since(*last_heartbeat.unwrap())
-                < Duration::from_millis(opt.heartbeat_timeout_ms)
+            None
         })
+        .collect();
+
+    let healthy_participants: HashMap<&String, &QuorumMemberDetails> = state
+        .participants
+        .iter()
+        .filter(|(replica_id, _details)| healthy_replicas.contains(replica_id))
         .collect();
 
     let mut candidate_participants: Vec<QuorumMember> = healthy_participants
@@ -138,15 +141,34 @@ fn quorum_compute(
     // Sort by replica ID to get a consistent ordering across runs.
     candidate_participants.sort_by_key(|p| p.replica_id.clone());
 
+    let shrink_only = healthy_participants
+        .iter()
+        .any(|(_, details)| details.member.shrink_only);
+
     let metadata = format!(
-        "[{}/{} participants healthy]",
+        "[{}/{} participants healthy][shrink_only={}]",
         healthy_participants.len(),
-        state.participants.len()
+        state.participants.len(),
+        shrink_only,
     );
 
     // Check if we can use the previous quorum.
+    // TODO: do we still need this given we have heartbeats?
     if state.prev_quorum.is_some() {
         let prev_quorum = state.prev_quorum.as_ref().unwrap();
+
+        let prev_replica_ids: HashSet<&String> = prev_quorum
+            .participants
+            .iter()
+            .map(|p| &p.replica_id)
+            .collect();
+
+        if shrink_only {
+            candidate_participants = candidate_participants
+                .into_iter()
+                .filter(|p| prev_replica_ids.contains(&p.replica_id))
+                .collect();
+        }
 
         // Fast quorum is when all previous participants are still in the quorum
         // and we have enough participants to form a quorum.
@@ -163,11 +185,12 @@ fn quorum_compute(
         }
     }
 
+    // Minimum quorum size check.
     if healthy_participants.len() < opt.min_replicas as usize {
         return (
             None,
             format!(
-                "No quorum, only have {} participants, need {} {}",
+                "No quorum, only have {} participants, need min_replicas {} {}",
                 healthy_participants.len(),
                 opt.min_replicas,
                 metadata
@@ -175,18 +198,36 @@ fn quorum_compute(
         );
     }
 
+    // Avoid split brain by requiring at least half of the known alive workers.
+    if healthy_participants.len() <= healthy_replicas.len() / 2 {
+        return (
+            None,
+            format!(
+                "No quorum, only have {} participants, need at least half of {} healthy workers {}",
+                healthy_participants.len(),
+                healthy_replicas.len(),
+                metadata
+            ),
+        );
+    }
+
+    let all_healthy_joined = healthy_participants.len() == healthy_replicas.len();
+
     // Quorum is valid at this point but lets wait for stragglers.
     let first_joined = healthy_participants
         .values()
         .map(|details| details.joined)
         .min()
         .unwrap_or(now);
-    if now.duration_since(first_joined) < Duration::from_millis(opt.join_timeout_ms) {
+    if !all_healthy_joined
+        && now.duration_since(first_joined) < Duration::from_millis(opt.join_timeout_ms)
+    {
         return (
             None,
             format!(
-                "Valid quorum with {} participants, waiting for stragglers due to join timeout {}",
+                "Valid quorum with {} participants, waiting for {} healthy but not participating stragglers due to join timeout {}",
                 healthy_participants.len(),
+                healthy_replicas.len() - healthy_participants.len(),
                 metadata
             ),
         );
@@ -546,17 +587,43 @@ mod tests {
                     store_address: "".to_string(),
                     step: 1,
                     world_size: 1,
+                    shrink_only: false,
                 },
             },
         );
         state.heartbeats.insert("a".to_string(), now);
 
-        assert!(!quorum_compute(now, &state, &opt).0.is_some());
+        state.participants.insert(
+            "b".to_string(),
+            QuorumMemberDetails {
+                joined: now,
+                member: QuorumMember {
+                    replica_id: "b".to_string(),
+                    address: "".to_string(),
+                    store_address: "".to_string(),
+                    step: 1,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+            },
+        );
+        state.heartbeats.insert("b".to_string(), now);
 
+        // all healthy workers participating
+        let (quorum_met, reason) = quorum_compute(now, &state, &opt);
+        assert!(quorum_met.is_some(), "{}", reason);
+
+        // add healthy worker but not participating
+        state.heartbeats.insert("c".to_string(), now);
+        let (quorum_met, reason) = quorum_compute(now, &state, &opt);
+        assert!(quorum_met.is_none(), "{}", reason);
+        assert!(reason.contains("join timeout"), "{}", reason);
+
+        // increase elapsed time to pass join timeout
         state.participants.get_mut("a").unwrap().joined =
             now.sub(Duration::from_secs(10 * 60 * 60));
-
-        assert!(quorum_compute(now, &state, &opt).0.is_some());
+        let (quorum_met, reason) = quorum_compute(now, &state, &opt);
+        assert!(quorum_met.is_some(), "{}", reason);
 
         Ok(())
     }
@@ -591,6 +658,7 @@ mod tests {
                     store_address: "".to_string(),
                     step: 1,
                     world_size: 1,
+                    shrink_only: false,
                 },
             },
         );
@@ -617,6 +685,7 @@ mod tests {
                     store_address: "".to_string(),
                     step: 1,
                     world_size: 1,
+                    shrink_only: false,
                 },
             },
         );
@@ -662,12 +731,17 @@ mod tests {
                     store_address: "".to_string(),
                     step: 1,
                     world_size: 1,
+                    shrink_only: false,
                 },
             },
         );
         state.heartbeats.insert("a".to_string(), now);
 
-        assert!(!quorum_compute(now, &state, &opt).0.is_some());
+        // Not proceeding since one worker is alive but not participating
+        state.heartbeats.insert("b".to_string(), now);
+        let (quorum_met, reason) = quorum_compute(now, &state, &opt);
+        assert!(quorum_met.is_none(), "{}", reason);
+        assert!(reason.contains("need at least half"), "{}", reason);
 
         state.prev_quorum = Some(Quorum {
             quorum_id: 1,
@@ -677,6 +751,7 @@ mod tests {
                 store_address: "".to_string(),
                 step: 1,
                 world_size: 1,
+                shrink_only: false,
             }],
             created: Some(SystemTime::now().into()),
         });
@@ -694,6 +769,7 @@ mod tests {
                     store_address: "".to_string(),
                     step: 1,
                     world_size: 1,
+                    shrink_only: false,
                 },
             },
         );
@@ -703,6 +779,92 @@ mod tests {
         assert!(quorum_met.is_some(), "{}", reason);
         let participants = quorum_met.unwrap();
         assert!(participants.len() == 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_quorum_shrink_only() -> Result<()> {
+        let opt = LighthouseOpt {
+            min_replicas: 1,
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 60 * 60 * 1000, // 1hr
+            quorum_tick_ms: 10,
+            heartbeat_timeout_ms: 5000,
+        };
+
+        let mut state = State {
+            channel: broadcast::channel(16).0,
+            participants: HashMap::new(),
+            prev_quorum: None,
+            quorum_id: 0,
+            heartbeats: HashMap::new(),
+        };
+
+        let now = Instant::now();
+
+        state.prev_quorum = Some(Quorum {
+            quorum_id: 1,
+            participants: vec![
+                QuorumMember {
+                    replica_id: "a".to_string(),
+                    address: "".to_string(),
+                    store_address: "".to_string(),
+                    step: 1,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+                QuorumMember {
+                    replica_id: "b".to_string(),
+                    address: "".to_string(),
+                    store_address: "".to_string(),
+                    step: 1,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+            ],
+            created: Some(SystemTime::now().into()),
+        });
+
+        state.participants.insert(
+            "a".to_string(),
+            QuorumMemberDetails {
+                joined: now,
+                member: QuorumMember {
+                    replica_id: "a".to_string(),
+                    address: "".to_string(),
+                    store_address: "".to_string(),
+                    step: 1,
+                    world_size: 1,
+                    shrink_only: true,
+                },
+            },
+        );
+        state.heartbeats.insert("a".to_string(), now);
+
+        // insert particpant that was not in prev quorum
+        state.participants.insert(
+            "c".to_string(),
+            QuorumMemberDetails {
+                joined: now,
+                member: QuorumMember {
+                    replica_id: "c".to_string(),
+                    address: "".to_string(),
+                    store_address: "".to_string(),
+                    step: 1,
+                    world_size: 1,
+                    shrink_only: true,
+                },
+            },
+        );
+        state.heartbeats.insert("c".to_string(), now);
+
+        let (quorum_met, reason) = quorum_compute(now, &state, &opt);
+        assert!(quorum_met.is_some(), "{}", reason);
+
+        let quorum = quorum_met.unwrap();
+        assert!(quorum.len() == 1);
+        assert!(quorum[0].replica_id == "a");
 
         Ok(())
     }
@@ -738,6 +900,7 @@ mod tests {
                     store_address: "".to_string(),
                     step: 10,
                     world_size: 1,
+                    shrink_only: false,
                 }),
             });
 
@@ -751,6 +914,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_quorum_split_brain() -> Result<()> {
+        let opt = LighthouseOpt {
+            min_replicas: 1,
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 60 * 60 * 1000, // 1hr
+            quorum_tick_ms: 10,
+            heartbeat_timeout_ms: 5000,
+        };
+
+        let mut state = State {
+            channel: broadcast::channel(16).0,
+            participants: HashMap::new(),
+            prev_quorum: None,
+            quorum_id: 0,
+            heartbeats: HashMap::new(),
+        };
+
+        let now = Instant::now();
+
+        assert!(!quorum_compute(now, &state, &opt).0.is_some());
+
+        state.participants.insert(
+            "a".to_string(),
+            QuorumMemberDetails {
+                joined: now,
+                member: QuorumMember {
+                    replica_id: "a".to_string(),
+                    address: "".to_string(),
+                    store_address: "".to_string(),
+                    step: 1,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+            },
+        );
+        state.heartbeats.insert("a".to_string(), now);
+        let (quorum_met, reason) = quorum_compute(now, &state, &opt);
+        assert!(quorum_met.is_some(), "{}", reason);
+
+        // Not proceeding since one worker is alive but not participating
+        state.heartbeats.insert("b".to_string(), now);
+        let (quorum_met, reason) = quorum_compute(now, &state, &opt);
+        assert!(quorum_met.is_none(), "{}", reason);
+        assert!(reason.contains("at least half"), "{}", reason);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_quorum_changed() {
         let a = vec![QuorumMember {
             replica_id: "1".to_string(),
@@ -758,6 +970,7 @@ mod tests {
             store_address: "".to_string(),
             step: 1,
             world_size: 1,
+            shrink_only: false,
         }];
         let b = vec![QuorumMember {
             replica_id: "1".to_string(),
@@ -765,6 +978,7 @@ mod tests {
             store_address: "changed".to_string(),
             step: 1000,
             world_size: 1,
+            shrink_only: false,
         }];
 
         // replica_id is the same
@@ -776,6 +990,7 @@ mod tests {
             store_address: "".to_string(),
             step: 1,
             world_size: 1,
+            shrink_only: false,
         }];
         // replica_id changed
         assert!(quorum_changed(&a, &c));

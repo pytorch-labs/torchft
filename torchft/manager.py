@@ -338,6 +338,7 @@ class Manager:
     def start_quorum(
         self,
         allow_heal: bool = True,
+        shrink_only: bool = False,
         timeout: Optional[timedelta] = None,
     ) -> None:
         """
@@ -372,6 +373,7 @@ class Manager:
         self._quorum_future = self._executor.submit(
             self._async_quorum,
             allow_heal=allow_heal,
+            shrink_only=shrink_only,
             timeout=timeout or self._timeout,
         )
         if not self._use_async_quorum:
@@ -396,7 +398,9 @@ class Manager:
         ), "must call start_quorum before wait_quorum"
         self._quorum_future.result()
 
-    def _async_quorum(self, allow_heal: bool, timeout: timedelta) -> None:
+    def _async_quorum(
+        self, allow_heal: bool, shrink_only: bool, timeout: timedelta
+    ) -> None:
         (
             quorum_id,
             replica_rank,
@@ -411,6 +415,7 @@ class Manager:
             rank=self._rank,
             step=self._step,
             checkpoint_server_addr=self._ckpt_server.address(),
+            shrink_only=shrink_only,
             timeout=timeout,
         )
 

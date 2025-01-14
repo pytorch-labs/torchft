@@ -213,6 +213,7 @@ impl ManagerService for Arc<Manager> {
                         store_address: self.store_address.clone(),
                         step: req.step,
                         world_size: self.world_size,
+                        shrink_only: req.shrink_only,
                     }),
                 });
 
@@ -250,12 +251,18 @@ impl ManagerService for Arc<Manager> {
         let mut participants = quorum.participants.clone();
         participants.sort_by(|a, b| a.replica_id.cmp(&b.replica_id));
 
-        let mut replica_rank = 10000000000;
-        for (i, p) in participants.iter().enumerate() {
+        let replica_rank = participants.iter().enumerate().find_map(|(i, p)| {
             if p.replica_id == self.replica_id {
-                replica_rank = i;
-                break;
+                Some(i)
+            } else {
+                None
             }
+        });
+        if replica_rank.is_none() {
+            return Err(Status::not_found(format!(
+                "replica {} not participating in returned quorum",
+                self.replica_id
+            )));
         }
 
         let max_step = participants.iter().map(|p| p.step).max().unwrap();
@@ -291,7 +298,7 @@ impl ManagerService for Arc<Manager> {
             max_step: max_step,
             max_rank: max_rank,
             max_world_size: max_participants.len() as i64,
-            replica_rank: replica_rank as i64,
+            replica_rank: replica_rank.unwrap() as i64,
             replica_world_size: participants.len() as i64,
             heal: heal,
         };
@@ -469,6 +476,7 @@ mod tests {
             rank: 0,
             step: 123,
             checkpoint_server_addr: "addr".to_string(),
+            shrink_only: false,
         });
         request.set_timeout(Duration::from_secs(10));
         let resp = client.quorum(request).await?.into_inner();
@@ -526,6 +534,7 @@ mod tests {
                     rank: 0,
                     step: 0,
                     checkpoint_server_addr: "addr".to_string(),
+                    shrink_only: false,
                 });
                 request.set_timeout(Duration::from_secs(10));
 

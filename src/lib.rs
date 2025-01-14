@@ -105,13 +105,14 @@ impl ManagerClient {
         })
     }
 
-    #[pyo3(signature = (rank, step, checkpoint_server_addr, timeout=None))]
+    #[pyo3(signature = (rank, step, checkpoint_server_addr, shrink_only, timeout=None))]
     fn quorum(
         &mut self,
         py: Python<'_>,
         rank: i64,
         step: i64,
         checkpoint_server_addr: String,
+        shrink_only: bool,
         timeout: Option<Duration>,
     ) -> Result<(i64, i64, i64, String, String, i64, Option<i64>, i64, bool), StatusError> {
         py.allow_threads(move || {
@@ -119,6 +120,7 @@ impl ManagerClient {
                 rank: rank,
                 step: step,
                 checkpoint_server_addr: checkpoint_server_addr,
+                shrink_only: shrink_only,
             });
             // This notifies the server about the timeout but doesn't affect the
             // endpoint timeout which we set on client creation.
