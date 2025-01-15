@@ -18,15 +18,98 @@ import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler
 from typing import Callable, Generic, TypeVar
+from dataclasses import dataclass
+import pickle
+from io import BufferedIOBase
+from typing import Tuple
+import struct
 
 import torch
-
+from torch.utils._pytree import tree_flatten, tree_unflatten
+from hashlib import sha256
 from torchft.http import _IPv6HTTPServer
 
 logger: logging.Logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+
+@dataclass
+class TensorMetadata:
+    nbytes: int
+    dtype: torch.dtype
+    storage_offset: int
+    size: Tuple[int, ...]
+    stride: Tuple[int, ...]
+
+
+def write_state_dict(state_dict: object, f: BufferedIOBase) -> None:
+    """
+    Write the state_dict to the file-like object.
+    """
+    values, spec = tree_flatten(state_dict)
+
+    storages = []
+    non_tensor_values = []
+    for value in values:
+        if isinstance(value, torch.Tensor):
+            storage = value.untyped_storage()
+            storages.append(storage)
+            non_tensor_values.append(
+                TensorMetadata(
+                    nbytes=storage.nbytes(),
+                    dtype=value.dtype,
+                    storage_offset=value.storage_offset(),
+                    size=value.size(),
+                    stride=value.stride(),
+                )
+            )
+        else:
+            non_tensor_values.append(value)
+
+    meta_buf = pickle.dumps((non_tensor_values, spec))
+    checksum = sha256(meta_buf).hexdigest()
+    total_length = len(meta_buf) + len(checksum)
+
+    f.write(struct.pack("<q", total_length))
+    f.write(meta_buf)
+    f.write(checksum.encode("utf-8"))
+
+
+    for storage in storages:
+        storage._write_file(f, False, False, 1)
+
+
+def read_state_dict(f: BufferedIOBase) -> object:
+    """
+    Read the state_dict from the file-like object.
+    """
+
+    total_length = struct.unpack("<q", f.read(8))[0]
+    meta_buf = f.read(total_length - 64)
+    checksum = f.read(64).decode("utf-8")
+
+    # Verify checksum
+    actual_checksum = sha256(meta_buf).hexdigest()
+    if checksum != actual_checksum:
+        raise ValueError("Checksum mismatch! Data may be corrupted.")
+    non_tensor_values, spec = pickle.loads(meta_buf)
+    values = []
+    for value in non_tensor_values:
+        if isinstance(value, TensorMetadata):
+            data = f.read(value.nbytes)
+
+            tensor = torch.as_strided(
+                torch.frombuffer(data, dtype=value.dtype),
+                size=value.size,
+                stride=value.stride,
+                storage_offset=value.storage_offset,
+            )
+            values.append(tensor)
+        else:
+            values.append(value)
+
+    return tree_unflatten(values, spec)
 
 class CheckpointServer(Generic[T]):
     """
@@ -69,7 +152,7 @@ class CheckpointServer(Generic[T]):
 
                     sd = state_dict()
 
-                    torch.save(sd, self.wfile)
+                    write_state_dict(sd, self.wfile)
 
             def err(self, msg: str) -> None:
                 logger.error(msg)
@@ -100,7 +183,8 @@ class CheckpointServer(Generic[T]):
             data = f.read()
 
         reader = io.BytesIO(data)
-        return torch.load(reader, weights_only=True)
+        state_dict = read_state_dict(reader)
+        return state_dict
 
     def address(self) -> str:
         """
