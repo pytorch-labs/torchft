@@ -444,8 +444,6 @@ impl LighthouseService for Arc<Lighthouse> {
             .requester
             .ok_or_else(|| return Status::invalid_argument("missing requester"))?;
 
-        let requester_id = requester.replica_id.clone();
-        let requester_copy = requester.clone();
         info!("got quorum request for replica {}", &requester.replica_id);
 
         let mut rx = {
@@ -460,7 +458,7 @@ impl LighthouseService for Arc<Lighthouse> {
                 requester.replica_id.clone(),
                 QuorumMemberDetails {
                     joined: Instant::now(),
-                    member: requester,
+                    member: requester.clone(),
                 },
             );
             let rx = state.channel.subscribe();
@@ -479,7 +477,7 @@ impl LighthouseService for Arc<Lighthouse> {
             if current_quorum
                 .participants
                 .iter()
-                .any(|p| p.replica_id == requester_id)
+                .any(|p| p.replica_id == requester.replica_id)
             {
                 break current_quorum;
             }
@@ -487,13 +485,13 @@ impl LighthouseService for Arc<Lighthouse> {
             // Only continue the loop if the replica is not in the quorum
             let mut state = self.state.lock().await;
             state.participants.insert(
-                requester_id.clone(),
+                requester.replica_id.clone(),
                 QuorumMemberDetails {
                     joined: Instant::now(),
-                    member: requester_copy.clone(),
+                    member: requester.clone(),
                 },
             );
-            info!("Replica {} not in quorum, retrying", requester_id);
+            info!("Replica {} not in quorum, retrying", &requester.replica_id);
         };
 
         let reply = LighthouseQuorumResponse {
