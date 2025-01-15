@@ -543,15 +543,13 @@ mod tests {
     use super::*;
     use std::ops::Sub;
 
-    use tonic::transport::{Channel, Endpoint};
+    use tonic::transport::Channel;
 
+    use crate::net::connect;
     use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 
     async fn lighthouse_client_new(addr: String) -> Result<LighthouseServiceClient<Channel>> {
-        let conn = Endpoint::new(addr)?
-            .connect_timeout(Duration::from_secs(10))
-            .connect()
-            .await?;
+        let conn = connect(addr, Duration::from_secs(10)).await?;
         Ok(LighthouseServiceClient::new(conn))
     }
 

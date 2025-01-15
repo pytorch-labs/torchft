@@ -2,24 +2,22 @@ from datetime import timedelta
 from typing import Optional, Tuple
 
 class ManagerClient:
-    def __init__(self, addr: str, timeout: timedelta) -> None: ...
+    def __init__(self, addr: str, connect_timeout: timedelta) -> None: ...
     def quorum(
         self,
         rank: int,
         step: int,
         checkpoint_server_addr: str,
         shrink_only: bool,
-        timeout: Optional[timedelta] = None,
+        timeout: timedelta,
     ) -> Tuple[int, int, int, str, str, int, Optional[int], int, bool]: ...
-    def checkpoint_address(
-        self, rank: int, timeout: Optional[timedelta] = None
-    ) -> str: ...
+    def checkpoint_address(self, rank: int, timeout: timedelta) -> str: ...
     def should_commit(
         self,
         rank: int,
         step: int,
         should_commit: bool,
-        timeout: Optional[timedelta] = None,
+        timeout: timedelta,
     ) -> bool: ...
 
 class Manager:
@@ -32,6 +30,7 @@ class Manager:
         store_addr: str,
         world_size: int,
         heartbeat_interval: timedelta,
+        connect_timeout: timedelta,
     ) -> None: ...
     def address(self) -> str: ...
     def shutdown(self) -> None: ...

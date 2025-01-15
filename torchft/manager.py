@@ -92,6 +92,8 @@ class Manager:
         min_replica_size: int,
         use_async_quorum: bool = True,
         timeout: timedelta = timedelta(seconds=60),
+        quorum_timeout: timedelta = timedelta(seconds=60),
+        connect_timeout: timedelta = timedelta(seconds=60),
         rank: Optional[int] = None,
         world_size: Optional[int] = None,
         world_size_mode: WorldSizeMode = WorldSizeMode.DYNAMIC,
@@ -114,10 +116,22 @@ class Manager:
                 2. TORCHFT_MANAGER_PORT env var
                 3. arbitrary port assigned via 0
             use_async_quorum: whether to run the quorum asynchronously during the forward pass
-            timeout:
-                the default timeout for all operation, if you're using per
-                request timeouts this should be longer than the longest request
-                timeout.
+            timeout: the default timeout for all operations
+                Included:
+                    * collectives such as allreduce
+                    * should_commit rpc
+                    * checkpoint_address rpc
+                    * checkpoint HTTP operations
+                    * wrap_future
+            quorum_timeout: the default timeout to wait for the quorum to complete.
+                This generally should be longer than the training step time /
+                the interval between quorum checks to avoid any split brain
+                issues.
+
+                For LocalSGD/DiLoCo this may need to be set to ~1h or longer
+                depending on how frequently the syncs occur.
+            connect_timeout: the timeout used for establishing rpc connections
+                to ManagerServer and Lighthouse
             rank: the replica group local rank
             world_size: the replica group local world size
             store_addr: TCPStore address for this replica group
@@ -131,6 +145,8 @@ class Manager:
         self._pending_state_dict: Optional[Dict[str, object]] = None
         self._use_async_quorum = use_async_quorum
         self._timeout = timeout
+        self._quorum_timeout = quorum_timeout
+        self._connect_timeout = connect_timeout
         self._world_size_mode = world_size_mode
 
         store_addr = store_addr or os.environ["MASTER_ADDR"]
@@ -146,7 +162,10 @@ class Manager:
                 "torchft": cast(T, self.state_dict()),
             }
 
-        self._ckpt_server = CheckpointServer[Dict[str, T]](_manager_state_dict)
+        self._ckpt_server = CheckpointServer[Dict[str, T]](
+            _manager_state_dict,
+            timeout=timeout,
+        )
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="async_quorum"
         )
@@ -179,13 +198,14 @@ class Manager:
                 store_addr=f"{store_addr}:{store_port}",
                 world_size=world_size,
                 heartbeat_interval=heartbeat_interval,
+                connect_timeout=connect_timeout,
             )
 
             self._store.set(MANAGER_ADDR_KEY, self._manager.address())
             self._store.set(REPLICA_ID_KEY, replica_id)
 
         addr = self._store.get(MANAGER_ADDR_KEY).decode("utf-8")
-        self._client = ManagerClient(addr, timeout=timeout)
+        self._client = ManagerClient(addr, connect_timeout=connect_timeout)
 
         replica_id = self._store.get(REPLICA_ID_KEY).decode("utf-8")
         self._logger = _ManagerLogger(
@@ -356,7 +376,8 @@ class Manager:
                 If allow_heal is set, the manager will attempt to heal either
                 synchronously before returning or asynchronously prior to any network
                 calls. All replicas must pass the same value to allow_heal.
-            timeout: the timeout for quorum and recovery operations, if None, the manager's timeout will be used
+            timeout: the timeout for quorum to be ready, if None, the manager's timeout will be used
+                recovery operations will use the manager timeout
         """
 
         # wait for previous quorum to complete
@@ -374,7 +395,7 @@ class Manager:
             self._async_quorum,
             allow_heal=allow_heal,
             shrink_only=shrink_only,
-            timeout=timeout or self._timeout,
+            quorum_timeout=timeout or self._quorum_timeout,
         )
         if not self._use_async_quorum:
             self.wait_quorum()
@@ -399,7 +420,7 @@ class Manager:
         self._quorum_future.result()
 
     def _async_quorum(
-        self, allow_heal: bool, shrink_only: bool, timeout: timedelta
+        self, allow_heal: bool, shrink_only: bool, quorum_timeout: timedelta
     ) -> None:
         (
             quorum_id,
@@ -416,7 +437,7 @@ class Manager:
             step=self._step,
             checkpoint_server_addr=self._ckpt_server.address(),
             shrink_only=shrink_only,
-            timeout=timeout,
+            timeout=quorum_timeout,
         )
 
         # When using async quorum we need to take the recovered workers.
@@ -455,14 +476,16 @@ class Manager:
             self._logger.info(
                 f"healing required, fetching checkpoint server address from {address=} {max_step=}"
             )
-            primary_client = ManagerClient(address, timeout=timeout)
+            primary_client = ManagerClient(
+                address, connect_timeout=self._connect_timeout
+            )
             checkpoint_server_address = primary_client.checkpoint_address(
-                self._rank, timeout=timeout
+                self._rank, timeout=self._timeout
             )
 
             self._logger.info(f"fetching checkpoint from {checkpoint_server_address=}")
             self._pending_state_dict = CheckpointServer.load_from_address(
-                checkpoint_server_address
+                checkpoint_server_address, timeout=self._timeout
             )
             self.load_state_dict(self._pending_state_dict["torchft"])
             # we apply the user state dict only when safe from the main thread

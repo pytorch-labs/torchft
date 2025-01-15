@@ -16,6 +16,7 @@ import logging
 import socket
 import threading
 import urllib.request
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler
 from typing import Callable, Generic, TypeVar
 
@@ -40,36 +41,48 @@ class CheckpointServer(Generic[T]):
         state_dict: a callable that returns the state dict to be transferred
     """
 
-    def __init__(self, state_dict: Callable[[], T]) -> None:
+    def __init__(self, state_dict: Callable[[], T], timeout: timedelta) -> None:
         self._checkpoint_lock = threading.Lock()
         self._disallowed = False
         self._step = -1
+        self._timeout = timeout
 
         ckpt_server = self
 
         class RequestHandler(BaseHTTPRequestHandler):
+            # set request socket timeout to avoid hanging forever
+            timeout = self._timeout.total_seconds()
+
             def do_GET(self):
-                with ckpt_server._checkpoint_lock:
-                    step = ckpt_server._step
+                try:
+                    # validate socket timeout is actually set
+                    assert self.connection.gettimeout() == self.timeout
 
-                    if self.path != f"/checkpoint/{step}":
-                        self.send_response(400)
-                        self.send_header("Content-type", "text/plain")
+                    with ckpt_server._checkpoint_lock:
+                        step = ckpt_server._step
+
+                        if self.path != f"/checkpoint/{step}":
+                            self.send_response(400)
+                            self.send_header("Content-type", "text/plain")
+                            self.end_headers()
+                            self.err(
+                                f"invalid checkpoint requested, serving {step} but got {self.path}"
+                            )
+                            return
+
+                        self.send_response(200)
+                        self.send_header("Content-type", "application/octet-stream")
                         self.end_headers()
-                        self.err(
-                            f"invalid checkpoint requested, serving {step} but got {self.path}"
-                        )
-                        return
 
-                    self.send_response(200)
-                    self.send_header(
-                        "Content-type", "tensor"
-                    )  # TODO: correct mime type
+                        sd = state_dict()
+
+                        torch.save(sd, self.wfile)
+                except Exception as e:
+                    logger.exception(
+                        f"Exception in checkpoint server when handling {self.path=}: {e}",
+                    )
+                    self.send_response(500, str(e))
                     self.end_headers()
-
-                    sd = state_dict()
-
-                    torch.save(sd, self.wfile)
 
             def err(self, msg: str) -> None:
                 logger.error(msg)
@@ -87,7 +100,7 @@ class CheckpointServer(Generic[T]):
         self._thread.start()
 
     @classmethod
-    def load_from_address(cls, address: str) -> T:
+    def load_from_address(cls, address: str, timeout: timedelta) -> T:
         """
         Loads a checkpoint from the given address.
 
@@ -96,7 +109,7 @@ class CheckpointServer(Generic[T]):
         """
         logger.info(f"fetching checkpoint from {address}")
 
-        with urllib.request.urlopen(address) as f:
+        with urllib.request.urlopen(address, timeout=timeout.total_seconds()) as f:
             data = f.read()
 
         reader = io.BytesIO(data)

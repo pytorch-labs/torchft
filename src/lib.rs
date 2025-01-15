@@ -6,6 +6,9 @@
 
 pub mod lighthouse;
 pub mod manager;
+mod net;
+mod retry;
+mod timeout;
 
 use core::time::Duration;
 use std::env;
@@ -46,6 +49,7 @@ impl Manager {
         store_addr: String,
         world_size: u64,
         heartbeat_interval: Duration,
+        connect_timeout: Duration,
     ) -> PyResult<Self> {
         py.allow_threads(move || {
             let runtime = Runtime::new()?;
@@ -58,6 +62,7 @@ impl Manager {
                     store_addr,
                     world_size,
                     heartbeat_interval,
+                    connect_timeout,
                 ))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             let handle = runtime.spawn(manager.clone().run());
@@ -84,28 +89,25 @@ impl Manager {
 struct ManagerClient {
     runtime: Runtime,
     client: ManagerServiceClient<Channel>,
-    timeout: Duration,
 }
 
 #[pymethods]
 impl ManagerClient {
     #[new]
-    fn new(py: Python<'_>, addr: String, timeout: Duration) -> PyResult<Self> {
+    fn new(py: Python<'_>, addr: String, connect_timeout: Duration) -> PyResult<Self> {
         py.allow_threads(move || {
             let runtime = Runtime::new()?;
             let client = runtime
-                .block_on(manager::manager_client_new(addr, timeout))
+                .block_on(manager::manager_client_new(addr, connect_timeout))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
             Ok(Self {
                 runtime: runtime,
                 client: client,
-                timeout: timeout,
             })
         })
     }
 
-    #[pyo3(signature = (rank, step, checkpoint_server_addr, shrink_only, timeout=None))]
     fn quorum(
         &mut self,
         py: Python<'_>,
@@ -113,7 +115,7 @@ impl ManagerClient {
         step: i64,
         checkpoint_server_addr: String,
         shrink_only: bool,
-        timeout: Option<Duration>,
+        timeout: Duration,
     ) -> Result<(i64, i64, i64, String, String, i64, Option<i64>, i64, bool), StatusError> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(ManagerQuorumRequest {
@@ -122,9 +124,10 @@ impl ManagerClient {
                 checkpoint_server_addr: checkpoint_server_addr,
                 shrink_only: shrink_only,
             });
-            // This notifies the server about the timeout but doesn't affect the
-            // endpoint timeout which we set on client creation.
-            request.set_timeout(timeout.unwrap_or(self.timeout));
+
+            // This timeout is processed on the server side so we also enable
+            // keep alives to detect server health.
+            request.set_timeout(timeout);
 
             let response = self.runtime.block_on(self.client.quorum(request))?;
             let resp = response.into_inner();
@@ -142,18 +145,18 @@ impl ManagerClient {
         })
     }
 
-    #[pyo3(signature = (rank, timeout=None))]
     fn checkpoint_address(
         &mut self,
         py: Python<'_>,
         rank: i64,
-        timeout: Option<Duration>,
+        timeout: Duration,
     ) -> Result<String, StatusError> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(CheckpointAddressRequest { rank: rank });
-            // This notifies the server about the timeout but doesn't affect the
-            // endpoint timeout which we set on client creation.
-            request.set_timeout(timeout.unwrap_or(self.timeout));
+
+            // This timeout is processed on the server side so we also enable
+            // keep alives to detect server health.
+            request.set_timeout(timeout);
 
             let response = self
                 .runtime
@@ -163,14 +166,13 @@ impl ManagerClient {
         })
     }
 
-    #[pyo3(signature = (rank, step, should_commit, timeout=None))]
     fn should_commit(
         &mut self,
         py: Python<'_>,
         rank: i64,
         step: i64,
         should_commit: bool,
-        timeout: Option<Duration>,
+        timeout: Duration,
     ) -> Result<bool, StatusError> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(ShouldCommitRequest {
@@ -178,9 +180,10 @@ impl ManagerClient {
                 step: step,
                 should_commit: should_commit,
             });
+
             // This notifies the server about the timeout but doesn't affect the
             // endpoint timeout which we set on client creation.
-            request.set_timeout(timeout.unwrap_or(self.timeout));
+            request.set_timeout(timeout);
 
             let response = self.runtime.block_on(self.client.should_commit(request))?;
             let resp = response.into_inner();

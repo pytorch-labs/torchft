@@ -16,10 +16,12 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tonic::transport::server::TcpIncoming;
+use tonic::transport::Channel;
 use tonic::transport::Server;
-use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Response, Status};
 
+use crate::net::connect;
+use crate::timeout::try_parse_grpc_timeout;
 use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
 use crate::torchftpb::{
@@ -47,7 +49,6 @@ struct ManagerState {
 
 pub struct Manager {
     replica_id: String,
-    lighthouse_addr: String,
     hostname: String,
     store_address: String,
     world_size: u64,
@@ -55,21 +56,25 @@ pub struct Manager {
     listener: Mutex<Option<tokio::net::TcpListener>>,
     local_addr: SocketAddr,
     heartbeat_interval: Duration,
+    lighthouse_client: LighthouseServiceClient<Channel>,
 }
 
 pub async fn manager_client_new(
     addr: String,
-    timeout: Duration,
+    connect_timeout: Duration,
 ) -> Result<ManagerServiceClient<Channel>> {
-    // TODO add retries + backoff so other nodes can start before the rank0 comes up
-
     info!("ManagerClient: establishing connection to {}", &addr);
-    let conn = Endpoint::new(addr.clone())?
-        .timeout(timeout)
-        .connect_timeout(Duration::from_secs(60))
-        .connect()
-        .await?;
+    let conn = connect(addr, connect_timeout).await?;
     Ok(ManagerServiceClient::new(conn))
+}
+
+pub async fn lighthouse_client_new(
+    addr: String,
+    connect_timeout: Duration,
+) -> Result<LighthouseServiceClient<Channel>> {
+    info!("LighthouseClient: establishing connection to {}", &addr);
+    let conn = connect(addr, connect_timeout).await?;
+    Ok(LighthouseServiceClient::new(conn))
 }
 
 impl Manager {
@@ -81,6 +86,7 @@ impl Manager {
         store_addr: String,
         world_size: u64,
         heartbeat_interval: Duration,
+        connect_timeout: Duration,
     ) -> Result<Arc<Self>> {
         let listener = tokio::net::TcpListener::bind(&bind).await?;
         let local_addr = listener.local_addr()?;
@@ -88,9 +94,11 @@ impl Manager {
         let (should_commit_tx, _) = broadcast::channel(16);
         let (tx, _) = broadcast::channel(16);
 
+        let client = lighthouse_client_new(lighthouse_addr.clone(), connect_timeout).await?;
+
         Ok(Arc::new(Self {
             replica_id: replica_id,
-            lighthouse_addr: lighthouse_addr,
+            lighthouse_client: client,
             hostname: hostname,
             store_address: store_addr,
             world_size: world_size,
@@ -145,7 +153,7 @@ impl Manager {
     }
 
     async fn _run_heartbeat(self: Arc<Self>) -> Result<()> {
-        let mut client = self.lighthouse_client_new().await?;
+        let mut client = self.lighthouse_client.clone();
         loop {
             let request = tonic::Request::new(LighthouseHeartbeatRequest {
                 replica_id: self.replica_id.clone(),
@@ -157,17 +165,49 @@ impl Manager {
         }
     }
 
-    async fn lighthouse_client_new(&self) -> Result<LighthouseServiceClient<Channel>> {
-        info!(
-            "Manager: connecting to lighthouse at {}",
-            &self.lighthouse_addr
-        );
+    async fn _run_quorum(
+        &self,
+        state: &mut ManagerState,
+        requester: QuorumMember,
+        timeout: Duration,
+    ) -> Result<(), Status> {
+        if (state.participants.len() as u64) < self.world_size {
+            return Ok(());
+        }
 
-        let conn = Endpoint::new(self.lighthouse_addr.clone())?
-            .connect_timeout(Duration::from_secs(60))
-            .connect()
-            .await?;
-        Ok(LighthouseServiceClient::new(conn))
+        state.participants.clear();
+        info!("all workers joined -- starting quorum");
+
+        // TODO: don't hold the lock during quorum
+
+        let mut client = self.lighthouse_client.clone();
+
+        let mut lighthouse_request = tonic::Request::new(LighthouseQuorumRequest {
+            requester: Some(requester),
+        });
+        lighthouse_request.set_timeout(timeout);
+
+        let response = tokio::time::timeout(timeout, client.quorum(lighthouse_request))
+            .await
+            .unwrap_or_else(|e| {
+                Err(Status::cancelled(format!(
+                    "lighthouse quorum timed out: {}",
+                    e.to_string()
+                )))
+            })?;
+        let resp = response.into_inner();
+
+        info!("got lighthouse quorum {:?}", resp);
+
+        state
+            .channel
+            .send(
+                resp.quorum
+                    .ok_or_else(|| Status::internal("missing quorum"))?,
+            )
+            .map_err(|e| Status::from_error(e.into()))?;
+
+        Ok(())
     }
 }
 
@@ -182,6 +222,15 @@ impl ManagerService for Arc<Manager> {
 
         info!("got quorum request for rank {}", rank);
 
+        let timeout = try_parse_grpc_timeout(&request.metadata())
+            .map_err(|e| {
+                Status::invalid_argument(format!(
+                    "invalid timeout {}",
+                    e.to_str().unwrap_or("invalid")
+                ))
+            })?
+            .ok_or_else(|| Status::invalid_argument("missing timeout"))?;
+
         let mut rx = {
             let mut state = self.state.lock().await;
 
@@ -195,50 +244,19 @@ impl ManagerService for Arc<Manager> {
             state.participants.insert(rank);
             let rx = state.channel.subscribe();
 
-            if state.participants.len() as u64 >= self.world_size {
-                state.participants.clear();
-                info!("all workers joined -- starting quorum");
-
-                // TODO: don't hold the lock during quorum
-
-                let mut client = self
-                    .lighthouse_client_new()
-                    .await
-                    .map_err(|e| Status::from_error(e.into()))?;
-
-                let mut lighthouse_request = tonic::Request::new(LighthouseQuorumRequest {
-                    requester: Some(QuorumMember {
-                        replica_id: self.replica_id.clone(),
-                        address: self.address(),
-                        store_address: self.store_address.clone(),
-                        step: req.step,
-                        world_size: self.world_size,
-                        shrink_only: req.shrink_only,
-                    }),
-                });
-
-                // propagate timeout from request to lighthouse
-                let timeout = request
-                    .metadata()
-                    .get("grpc-timeout")
-                    .ok_or_else(|| Status::internal("grpc-timeout not set"))?;
-                lighthouse_request
-                    .metadata_mut()
-                    .insert("grpc-timeout", timeout.clone());
-
-                let response = client.quorum(lighthouse_request).await.unwrap();
-                let resp = response.into_inner();
-
-                info!("got lighthouse quorum {:?}", resp);
-
-                state
-                    .channel
-                    .send(
-                        resp.quorum
-                            .ok_or_else(|| Status::internal("missing quorum"))?,
-                    )
-                    .map_err(|e| Status::from_error(e.into()))?;
-            }
+            self._run_quorum(
+                &mut state,
+                QuorumMember {
+                    replica_id: self.replica_id.clone(),
+                    address: self.address(),
+                    store_address: self.store_address.clone(),
+                    step: req.step,
+                    world_size: self.world_size,
+                    shrink_only: req.shrink_only,
+                },
+                timeout,
+            )
+            .await?;
 
             rx
         };
@@ -413,14 +431,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_commit() -> Result<()> {
+        let lighthouse = Lighthouse::new(LighthouseOpt {
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 100,
+            min_replicas: 1,
+            quorum_tick_ms: 100,
+            heartbeat_timeout_ms: 5000,
+        })
+        .await?;
+        let lighthouse_fut = tokio::spawn(lighthouse.clone().run());
+
         let manager = Manager::new(
             "rep_id".to_string(),
-            "lighthouse".to_string(),
+            lighthouse.address(),
             "addr".to_string(),
             "[::]:29531".to_string(),
             "store_addr".to_string(),
             2,                          // world size
             Duration::from_millis(100), // heartbeat interval
+            Duration::from_secs(10),    // connect timeout
         )
         .await?;
         let manager_fut = tokio::spawn(manager._run_grpc());
@@ -442,6 +471,7 @@ mod tests {
         assert!(!resp_b.should_commit);
 
         manager_fut.abort();
+        lighthouse_fut.abort();
 
         Ok(())
     }
@@ -466,6 +496,7 @@ mod tests {
             "store_addr".to_string(),
             1,                          // world size
             Duration::from_millis(100), // heartbeat interval
+            Duration::from_secs(10),    // connect timeout
         )
         .await?;
         let manager_fut = tokio::spawn(manager.clone().run());
@@ -523,6 +554,7 @@ mod tests {
                     "store_addr".to_string(),
                     1,                          // world size
                     Duration::from_millis(100), // heartbeat interval
+                    Duration::from_secs(10),    // connect timeout
                 )
                 .await?;
                 let manager_fut = tokio::spawn(manager.clone().run());

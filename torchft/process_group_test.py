@@ -133,7 +133,9 @@ class ProcessGroupTest(TestCase):
 
         store_addr = f"localhost:{store.port}/prefix"
         pg = ProcessGroupGloo(timeout=timedelta(seconds=0.01))
-        with self.assertRaisesRegex(RuntimeError, "timeout after 10ms"):
+        with self.assertRaisesRegex(
+            RuntimeError, "(timeout after 10ms|Socket Timeout)"
+        ):
             pg.configure(store_addr, 0, 2)
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
