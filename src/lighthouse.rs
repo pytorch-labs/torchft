@@ -1019,6 +1019,23 @@ mod tests {
     #[tokio::test]
 
     async fn test_lighthouse_join_during_shrink() -> Result<()> {
+        fn create_member(id: &str, addr_num: &str, step: i64, shrink_only: bool) -> QuorumMember {
+            QuorumMember {
+                replica_id: id.to_string(),
+                address: format!("addr{}", addr_num),
+                store_address: format!("store{}", addr_num),
+                step,
+                world_size: 1,
+                shrink_only,
+            }
+        }
+
+        fn create_request(member: &QuorumMember) -> tonic::Request<LighthouseQuorumRequest> {
+            tonic::Request::new(LighthouseQuorumRequest {
+                requester: Some(member.clone()),
+            })
+        }
+
         let opt = LighthouseOpt {
             min_replicas: 2,
             bind: "[::]:0".to_string(),
@@ -1034,29 +1051,9 @@ mod tests {
         // Create client to interact with lighthouse
         let mut client = lighthouse_client_new(lighthouse.address()).await?;
 
-        // First quorum
-        let mut member0 = QuorumMember {
-            replica_id: "replica0".to_string(),
-            address: "addr1".to_string(),
-            store_address: "store1".to_string(),
-            step: 1,
-            world_size: 1,
-            shrink_only: false,
-        };
-        let mut member1 = QuorumMember {
-            replica_id: "replica1".to_string(),
-            address: "addr2".to_string(),
-            store_address: "store2".to_string(),
-            step: 1,
-            world_size: 1,
-            shrink_only: false,
-        };
-        let mut first_request = tonic::Request::new(LighthouseQuorumRequest {
-            requester: Some(member0.clone()),
-        });
-        let mut second_request = tonic::Request::new(LighthouseQuorumRequest {
-            requester: Some(member1.clone()),
-        });
+        // 1. First quorum
+        let mut first_request = create_request(&create_member("replica0", "1", 1, false));
+        let mut second_request = create_request(&create_member("replica1", "2", 1, false));
 
         tokio::spawn({
             let mut client = client.clone();
@@ -1069,33 +1066,16 @@ mod tests {
         assert_eq!(first_quorum.participants[1].replica_id, "replica1");
         assert_eq!(first_quorum.participants[1].step, 1);
 
-        // 2nd Quorum without joiner
-        let member2 = QuorumMember {
-            replica_id: "joiner".to_string(),
-            address: "addr3".to_string(),
-            store_address: "store3".to_string(),
-            step: 1,
-            world_size: 1,
-            shrink_only: false,
-        };
-        let joining_request = tonic::Request::new(LighthouseQuorumRequest {
-            requester: Some(member2.clone()),
-        });
+        // 2. Quorum without joiner
+        let joining_request = create_request(&create_member("joiner", "3", 1, false));
         let joining_task = tokio::spawn({
             let mut client = client.clone();
             async move { client.quorum(joining_request).await }
         });
 
         // Try to shrink only
-        member0.step = 2;
-        member1.step = 2;
-        member0.shrink_only = true;
-        first_request = tonic::Request::new(LighthouseQuorumRequest {
-            requester: Some(member0.clone()),
-        });
-        second_request = tonic::Request::new(LighthouseQuorumRequest {
-            requester: Some(member1.clone()),
-        });
+        first_request = create_request(&create_member("replica0", "1", 2, true));
+        second_request = create_request(&create_member("replica1", "2", 2, false));
 
         tokio::spawn({
             let mut client = client.clone();
@@ -1112,17 +1092,9 @@ mod tests {
         assert_eq!(second_quorum.participants[1].replica_id, "replica1");
         assert_eq!(second_quorum.participants[1].step, 2);
 
-        // Quorum 3 with joiner
-        member0.step = 3;
-        member1.step = 3;
-        member0.shrink_only = false;
-
-        first_request = tonic::Request::new(LighthouseQuorumRequest {
-            requester: Some(member0.clone()),
-        });
-        second_request = tonic::Request::new(LighthouseQuorumRequest {
-            requester: Some(member1.clone()),
-        });
+        // 3. Quorum with joiner
+        first_request = create_request(&create_member("replica0", "1", 3, false));
+        second_request = create_request(&create_member("replica1", "2", 3, false));
 
         tokio::spawn({
             let mut client = client.clone();
