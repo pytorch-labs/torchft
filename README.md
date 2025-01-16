@@ -52,7 +52,7 @@ greatly improve efficiency by avoiding stop the world training on errors.
 
 Before proceeding, ensure you have the following installed:
 
-- Rust (with necessaray dependencies)
+- Rust (with necessary dependencies)
 - `protobuf-compiler` and the corresponding development package for Protobuf.
 
 Note that the Rust versions available in many conda environments may be outdated. To install the latest version of Rust, we recommend downloading it directly from the official website as shown in the below command:
