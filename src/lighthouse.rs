@@ -1016,4 +1016,137 @@ mod tests {
         // replica_id changed
         assert!(quorum_changed(&a, &c));
     }
+    #[tokio::test]
+
+    async fn test_lighthouse_join_during_shrink() -> Result<()> {
+        let opt = LighthouseOpt {
+            min_replicas: 2,
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 1000,
+            quorum_tick_ms: 10,
+            heartbeat_timeout_ms: 5000,
+        };
+
+        // Start the lighthouse service
+        let lighthouse = Lighthouse::new(opt).await?;
+        let lighthouse_task = tokio::spawn(lighthouse.clone().run());
+
+        // Create client to interact with lighthouse
+        let mut client = lighthouse_client_new(lighthouse.address()).await?;
+
+        // First quorum
+        let mut member0 = QuorumMember {
+            replica_id: "replica0".to_string(),
+            address: "addr1".to_string(),
+            store_address: "store1".to_string(),
+            step: 1,
+            world_size: 1,
+            shrink_only: false,
+        };
+        let mut member1 = QuorumMember {
+            replica_id: "replica1".to_string(),
+            address: "addr2".to_string(),
+            store_address: "store2".to_string(),
+            step: 1,
+            world_size: 1,
+            shrink_only: false,
+        };
+        let mut first_request = tonic::Request::new(LighthouseQuorumRequest {
+            requester: Some(member0.clone()),
+        });
+        let mut second_request = tonic::Request::new(LighthouseQuorumRequest {
+            requester: Some(member1.clone()),
+        });
+
+        tokio::spawn({
+            let mut client = client.clone();
+            async move { client.quorum(first_request).await }
+        });
+        let first_response = client.quorum(second_request).await?;
+        let first_quorum = first_response.into_inner().quorum.unwrap();
+        assert_eq!(first_quorum.participants.len(), 2);
+        assert_eq!(first_quorum.participants[0].replica_id, "replica0");
+        assert_eq!(first_quorum.participants[1].replica_id, "replica1");
+        assert_eq!(first_quorum.participants[1].step, 1);
+
+        // 2nd Quorum without joiner
+        let member2 = QuorumMember {
+            replica_id: "joiner".to_string(),
+            address: "addr3".to_string(),
+            store_address: "store3".to_string(),
+            step: 1,
+            world_size: 1,
+            shrink_only: false,
+        };
+        let joining_request = tonic::Request::new(LighthouseQuorumRequest {
+            requester: Some(member2.clone()),
+        });
+        let joining_task = tokio::spawn({
+            let mut client = client.clone();
+            async move { client.quorum(joining_request).await }
+        });
+
+        // Try to shrink only
+        member0.step = 2;
+        member1.step = 2;
+        member0.shrink_only = true;
+        first_request = tonic::Request::new(LighthouseQuorumRequest {
+            requester: Some(member0.clone()),
+        });
+        second_request = tonic::Request::new(LighthouseQuorumRequest {
+            requester: Some(member1.clone()),
+        });
+
+        tokio::spawn({
+            let mut client = client.clone();
+            async move { client.quorum(first_request).await }
+        });
+        let second_response = client.quorum(second_request).await?;
+        let second_quorum = second_response.into_inner().quorum.unwrap();
+        assert!(second_quorum
+            .participants
+            .iter()
+            .all(|p| p.replica_id != "joiner"));
+        assert_eq!(second_quorum.participants.len(), 2);
+        assert_eq!(second_quorum.participants[0].replica_id, "replica0");
+        assert_eq!(second_quorum.participants[1].replica_id, "replica1");
+        assert_eq!(second_quorum.participants[1].step, 2);
+
+        // Quorum 3 with joiner
+        member0.step = 3;
+        member1.step = 3;
+        member0.shrink_only = false;
+
+        first_request = tonic::Request::new(LighthouseQuorumRequest {
+            requester: Some(member0.clone()),
+        });
+        second_request = tonic::Request::new(LighthouseQuorumRequest {
+            requester: Some(member1.clone()),
+        });
+
+        tokio::spawn({
+            let mut client = client.clone();
+            async move { client.quorum(first_request).await }
+        });
+        let third_response = client.quorum(second_request).await?;
+        let third_quorum = third_response.into_inner().quorum.unwrap();
+        assert!(third_quorum
+            .participants
+            .iter()
+            .any(|p| p.replica_id == "joiner"));
+        assert_eq!(third_quorum.participants.len(), 3);
+        assert_eq!(third_quorum.participants[2].step, 3);
+
+        let join_result = joining_task.await?;
+        let join_quorum = join_result.unwrap().into_inner().quorum.unwrap();
+        assert!(join_quorum
+            .participants
+            .iter()
+            .any(|p| p.replica_id == "joiner"));
+        assert_eq!(join_quorum.participants.len(), 3);
+        assert_eq!(join_quorum.participants[2].step, 3);
+
+        lighthouse_task.abort();
+        Ok(())
+    }
 }
