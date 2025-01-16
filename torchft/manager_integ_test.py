@@ -10,8 +10,6 @@ from unittest import TestCase
 
 import torch
 import torch.distributed as dist
-
-# pyre-fixme[21]: missing module
 from parameterized import parameterized
 from torch import nn, optim
 
@@ -292,7 +290,6 @@ class ManagerIntegTest(TestCase):
         for state_dict in state_dicts:
             torch.testing.assert_close(state_dict, state_dicts[0])
 
-    # pyre-fixme[56]: couldn't infer type of decorator
     @parameterized.expand(
         [
             (

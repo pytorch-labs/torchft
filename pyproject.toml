@@ -27,7 +27,8 @@ dev = [
     "pyre-check",
     "parameterized",
     "expecttest",
-    "numpy"
+    "numpy",
+    "torchx"
 ]
 
 [tool.maturin]

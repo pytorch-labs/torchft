@@ -302,11 +302,16 @@ impl From<Status> for StatusError {
 #[pymodule]
 fn torchft(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // setup logging on import
-    stderrlog::new()
-        .verbosity(2)
+    let mut log = stderrlog::new();
+    log.verbosity(2)
         .show_module_names(true)
-        .timestamp(stderrlog::Timestamp::Millisecond)
-        .init()
+        .timestamp(stderrlog::Timestamp::Millisecond);
+
+    if env::var("CLICOLOR_FORCE").is_ok() {
+        log.color(stderrlog::ColorChoice::AlwaysAnsi);
+    }
+
+    log.init()
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
     m.add_class::<Manager>()?;

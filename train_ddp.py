@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as transforms
 from torch import nn, optim
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from torchft import (
@@ -27,6 +28,7 @@ from torchft import (
 logging.basicConfig(level=logging.INFO)
 
 
+@record
 def main() -> None:
     REPLICA_GROUP_ID = int(os.environ.get("REPLICA_GROUP_ID", 0))
     NUM_REPLICA_GROUPS = int(os.environ.get("NUM_REPLICA_GROUPS", 2))

@@ -96,6 +96,21 @@ make livehtml
 The docs will be built in the `docs/build/html` directory and served at http://localhost:8000.
 The page will be automatically re-built as long as the process is kept running.
 
+### Running Multiple Replica Local Job
+
+We use torchx to run multiple worker local test jobs. You need to run the
+lighthouse first and then you can use torchx to launch as many replica groups as
+you want. This uses the [train_ddp.py](./train_ddp.py) script.
+
+```sh
+$ torchft_lighthouse --min_replicas 2 --join_timeout_ms 10000 &
+$ torchx run -- --replicas 10
+```
+
+Once the Lighthouse has started you can view the status of all the workers at the Lighthouse dashboard.
+
+Default address is: http://localhost:29510
+
 ## Contributor License Agreement ("CLA")
 
 In order to accept your pull request, we need you to submit a CLA. You only need to do this once to work on any of

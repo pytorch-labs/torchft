@@ -377,21 +377,26 @@ impl Lighthouse {
 
             let (_, quorum_status) = quorum_compute(Instant::now(), &state, &self.opt);
 
-            let max_step = {
-                if let Some(quorum) = state.prev_quorum.clone() {
-                    quorum
-                        .participants
-                        .iter()
-                        .map(|p| p.step)
-                        .max()
-                        .unwrap_or(-1)
-                } else {
-                    -1
-                }
+            let max_step = if let Some(quorum) = &state.prev_quorum {
+                quorum
+                    .participants
+                    .iter()
+                    .map(|p| p.step)
+                    .max()
+                    .unwrap_or(-1)
+            } else {
+                -1
+            };
+
+            let num_participants = if let Some(quorum) = &state.prev_quorum {
+                quorum.participants.len() as i64
+            } else {
+                -1
             };
 
             StatusTemplate {
                 quorum_id: state.quorum_id,
+                num_participants: num_participants,
                 prev_quorum: state.prev_quorum.clone(),
                 quorum_status: quorum_status,
                 max_step: max_step,
@@ -527,6 +532,7 @@ struct StatusTemplate {
     prev_quorum: Option<Quorum>,
     quorum_id: i64,
     quorum_status: String,
+    num_participants: i64,
     max_step: i64,
     heartbeats: HashMap<String, Instant>,
 

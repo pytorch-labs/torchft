@@ -6,6 +6,7 @@ Next quorum status: {{quorum_status}}
 {% if let Some(prev_quorum) = prev_quorum %}
 
 Previous quorum id: {{prev_quorum.quorum_id}} <br>
+Num participants: {{num_participants}} <br>
 Quorum age:
 {{SystemTime::try_from(prev_quorum.created.unwrap()).unwrap().elapsed().unwrap().as_secs_f64()}}s
 

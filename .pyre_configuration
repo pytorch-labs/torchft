@@ -6,5 +6,9 @@
       "import_root": ".",
       "source": "torchft"
     }
+  ],
+  "search_path": [
+    {"site-package": "torchx"},
+    {"site-package": "parameterized"}
   ]
 }

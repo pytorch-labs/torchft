@@ -1,0 +1,3 @@
+[cli:run]
+component=torchft/torchx.py:hsdp
+scheduler=local_cwd
