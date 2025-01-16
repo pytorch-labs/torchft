@@ -48,12 +48,13 @@ def main() -> None:
         rank=0,
         # for DDP we can use replica groups of size 1, FSDP/PP/CP would need more.
         num_replicas=1,
+        shuffle=True,
     )
 
     # This uses the torchdata StatefulDataLoader to be able to checkpoint and
     # restore the per worker dataloader position.
     trainloader = StatefulDataLoader(
-        trainset, batch_size=64, shuffle=True, num_workers=2
+        trainset, batch_size=64, num_workers=2, sampler=sampler
     )
 
     def load_state_dict(state_dict):
