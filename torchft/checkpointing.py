@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import Callable, Generic, TypeVar
 
 import torch
+import torch.distributed as dist
 
 from torchft.http import _IPv6HTTPServer
 
@@ -76,6 +77,14 @@ class CheckpointServer(Generic[T]):
 
                         sd = state_dict()
 
+                        def func(obj):
+                            if isinstance(obj, dist.tensor.DTensor) and hasattr(obj, "device_mesh") and hasattr(obj.device_mesh, "replicate_pg"):
+                                obj.device_mesh.replicate_pg = None
+
+                        from torch.utils._pytree import tree_map
+
+                        tree_map(func, sd["user"])
+
                         torch.save(sd, self.wfile)
                 except Exception as e:
                     logger.exception(
@@ -113,7 +122,9 @@ class CheckpointServer(Generic[T]):
             data = f.read()
 
         reader = io.BytesIO(data)
-        return torch.load(reader, weights_only=True)
+        print(f"{reader.read(100)=}")
+        reader.seek(0)
+        return torch.load(reader, weights_only=False)
 
     def address(self) -> str:
         """
