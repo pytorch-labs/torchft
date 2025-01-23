@@ -109,7 +109,7 @@ impl ManagerClient {
     }
 
     fn quorum(
-        &mut self,
+        &self,
         py: Python<'_>,
         rank: i64,
         step: i64,
@@ -129,7 +129,7 @@ impl ManagerClient {
             // keep alives to detect server health.
             request.set_timeout(timeout);
 
-            let response = self.runtime.block_on(self.client.quorum(request))?;
+            let response = self.runtime.block_on(self.client.clone().quorum(request))?;
             let resp = response.into_inner();
             Ok((
                 resp.quorum_id,
@@ -146,7 +146,7 @@ impl ManagerClient {
     }
 
     fn checkpoint_address(
-        &mut self,
+        &self,
         py: Python<'_>,
         rank: i64,
         timeout: Duration,
@@ -160,14 +160,14 @@ impl ManagerClient {
 
             let response = self
                 .runtime
-                .block_on(self.client.checkpoint_address(request))?;
+                .block_on(self.client.clone().checkpoint_address(request))?;
             let resp = response.into_inner();
             Ok(resp.checkpoint_server_address)
         })
     }
 
     fn should_commit(
-        &mut self,
+        &self,
         py: Python<'_>,
         rank: i64,
         step: i64,
@@ -185,7 +185,9 @@ impl ManagerClient {
             // endpoint timeout which we set on client creation.
             request.set_timeout(timeout);
 
-            let response = self.runtime.block_on(self.client.should_commit(request))?;
+            let response = self
+                .runtime
+                .block_on(self.client.clone().should_commit(request))?;
             let resp = response.into_inner();
             Ok(resp.should_commit)
         })
