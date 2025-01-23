@@ -126,6 +126,7 @@ def main():
         load_state_dict=load_state_dict,
         state_dict=state_dict,
         replica_id=f"train_fsdp_{REPLICA_GROUP_ID}",
+        use_async_quorum=False,
     )
 
     mesh = hsdp_device_mesh(NUM_REPLICA_GROUPS, NUM_REPLICAS, "cuda" if torch.cuda.is_available() else "cpu", manager=manager)
@@ -135,8 +136,6 @@ def main():
     model.to(device)
     
     optimizer = Optimizer(manager, torch.optim.Adam(model.parameters(), lr=1e-5))
-
-    optimizer.zero_grad()
 
     while manager.current_step() < 500:
         model.train()

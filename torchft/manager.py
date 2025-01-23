@@ -36,6 +36,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, cast
 
 import torch
+import torch.distributed as dist
 from torch.distributed import ReduceOp, TCPStore
 
 from torchft.checkpointing import CheckpointServer
