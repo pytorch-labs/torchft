@@ -36,6 +36,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, cast
 
 import torch
+import torch.distributed as dist
 from torch.distributed import ReduceOp, TCPStore
 
 from torchft.checkpointing import CheckpointServer
@@ -487,6 +488,15 @@ class Manager:
             self._pending_state_dict = CheckpointServer.load_from_address(
                 checkpoint_server_address, timeout=self._timeout
             )
+
+            def func(obj):
+                if isinstance(obj, dist.tensor.DTensor) and hasattr(obj, "device_mesh") and hasattr(obj.device_mesh, "replicate_pg"):
+                    obj.device_mesh.replicate_pg = self._pg
+
+            from torch.utils._pytree import tree_map
+
+            tree_map(func, self._pending_state_dict["user"])
+
             self.load_state_dict(self._pending_state_dict["torchft"])
             # we apply the user state dict only when safe from the main thread
 
