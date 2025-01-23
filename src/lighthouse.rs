@@ -146,9 +146,10 @@ fn quorum_compute(
         .any(|(_, details)| details.member.shrink_only);
 
     let metadata = format!(
-        "[{}/{} participants healthy][shrink_only={}]",
+        "[{}/{} participants healthy][{} heartbeating][shrink_only={}]",
         healthy_participants.len(),
         state.participants.len(),
+        healthy_replicas.len(),
         shrink_only,
     );
 
@@ -190,7 +191,7 @@ fn quorum_compute(
         return (
             None,
             format!(
-                "No quorum, only have {} participants, need min_replicas {} {}",
+                "New quorum not ready, only have {} participants, need min_replicas {} {}",
                 healthy_participants.len(),
                 opt.min_replicas,
                 metadata
@@ -203,7 +204,7 @@ fn quorum_compute(
         return (
             None,
             format!(
-                "No quorum, only have {} participants, need at least half of {} healthy workers {}",
+                "New quorum not ready, only have {} participants, need at least half of {} healthy workers {}",
                 healthy_participants.len(),
                 healthy_replicas.len(),
                 metadata
@@ -261,7 +262,7 @@ impl Lighthouse {
 
     fn _quorum_tick(self: Arc<Self>, state: &mut State) -> Result<()> {
         let (quorum_met, reason) = quorum_compute(Instant::now(), state, &self.opt);
-        info!("{}", reason);
+        info!("Next quorum status: {}", reason);
 
         if quorum_met.is_some() {
             let participants = quorum_met.unwrap();
@@ -600,7 +601,9 @@ mod tests {
 
         let now = Instant::now();
 
-        assert!(!quorum_compute(now, &state, &opt).0.is_some());
+        let (quorum_met, reason) = quorum_compute(now, &state, &opt);
+        assert!(quorum_met.is_none(), "{}", reason);
+        assert!(reason.contains("New quorum not ready, only have 0 participants, need min_replicas 1 [0/0 participants healthy]"), "{}", reason);
 
         state.participants.insert(
             "a".to_string(),
@@ -689,7 +692,13 @@ mod tests {
         );
         state.heartbeats.insert("a".to_string(), now);
 
-        assert!(quorum_compute(now, &state, &opt).0.is_some());
+        let (quorum_met, reason) = quorum_compute(now, &state, &opt);
+        assert!(quorum_met.is_some(), "{}", reason);
+        assert!(
+            reason.contains("[1/1 participants healthy][1 heartbeating]"),
+            "{}",
+            reason
+        );
 
         // expired heartbeat
         state
@@ -698,6 +707,11 @@ mod tests {
 
         let (quorum_met, reason) = quorum_compute(now, &state, &opt);
         assert!(quorum_met.is_none(), "{}", reason);
+        assert!(
+            reason.contains("[0/1 participants healthy][0 heartbeating]"),
+            "{}",
+            reason
+        );
 
         // 1 healthy, 1 expired
         state.participants.insert(
@@ -886,6 +900,7 @@ mod tests {
 
         let (quorum_met, reason) = quorum_compute(now, &state, &opt);
         assert!(quorum_met.is_some(), "{}", reason);
+        assert!(reason.contains("[shrink_only=true]",), "{}", reason);
 
         let quorum = quorum_met.unwrap();
         assert!(quorum.len() == 1);
@@ -982,7 +997,7 @@ mod tests {
         state.heartbeats.insert("b".to_string(), now);
         let (quorum_met, reason) = quorum_compute(now, &state, &opt);
         assert!(quorum_met.is_none(), "{}", reason);
-        assert!(reason.contains("at least half"), "{}", reason);
+        assert!(reason.contains("New quorum not ready, only have 1 participants, need at least half of 2 healthy workers [1/1 participants healthy][2 heartbeating]"), "{}", reason);
 
         Ok(())
     }
