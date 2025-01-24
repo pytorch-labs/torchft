@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, cast
 import torch
 from torch.distributed import ReduceOp, TCPStore
 
-from torchft.checkpointing import CheckpointServer
+from torchft.checkpointing import CheckpointServer, CheckpointTransport
 from torchft.futures import future_timeout
 from torchft.torchft import Manager as _Manager, ManagerClient
 
@@ -104,6 +104,7 @@ class Manager:
         port: Optional[int] = None,
         hostname: str = socket.gethostname(),
         heartbeat_interval: timedelta = timedelta(milliseconds=100),
+        checkpoint_transport: Optional[CheckpointTransport[Dict[str, T]]] = None,
     ) -> None:
         """
         Args:
@@ -139,6 +140,8 @@ class Manager:
             lighthouse_addr: if rank==0, the address of the lighthouse server
             replica_id: if rank==0, the replica_id for this group
             hostname: if rank==0, the hostname to advertise to the lighthouse server
+            checkpoint_transport: the checkpoint transport to use for
+                transfering checkpoints to recovering replicas
         """
         self._load_state_dict = load_state_dict
         self._state_dict = state_dict
@@ -156,15 +159,15 @@ class Manager:
         world_size = world_size or int(os.environ["WORLD_SIZE"])
         self._min_replica_size = min_replica_size
 
-        def _manager_state_dict() -> Dict[str, T]:
-            return {
-                "user": state_dict(),
-                "torchft": cast(T, self.state_dict()),
-            }
+        self._user_state_dict = state_dict
 
-        self._ckpt_server = CheckpointServer[Dict[str, T]](
-            _manager_state_dict,
-            timeout=timeout,
+        if checkpoint_transport is None:
+            checkpoint_transport = CheckpointServer[Dict[str, T]](
+                timeout=timeout,
+            )
+
+        self._checkpoint_transport: CheckpointTransport[Dict[str, T]] = (
+            checkpoint_transport
         )
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="async_quorum"
@@ -223,14 +226,14 @@ class Manager:
         self._participating_rank: Optional[int] = None
         self._participating_world_size: int = 0
 
-    def shutdown(self) -> None:
+    def shutdown(self, wait: bool = True) -> None:
         """
         Shutdown the manager and checkpoint server.
         """
-        self._ckpt_server.shutdown()
+        self._checkpoint_transport.shutdown(wait=wait)
         if self._manager is not None:
             self._manager.shutdown()
-        self._executor.shutdown()
+        self._executor.shutdown(wait=wait)
 
     def allreduce(self, tensor: torch.Tensor) -> torch.futures.Future[torch.Tensor]:
         """
@@ -386,7 +389,6 @@ class Manager:
 
         self._errored = None
         self._healing = False
-        self._ckpt_server.allow_checkpoint(self._step)
 
         # TODO: we should really be wrapping this whole section in a try-except
         # block to allow gracefully recovering from issues in PG setup and quorum.
@@ -422,23 +424,23 @@ class Manager:
     def _async_quorum(
         self, allow_heal: bool, shrink_only: bool, quorum_timeout: timedelta
     ) -> None:
-        (
-            quorum_id,
-            replica_rank,
-            replica_world_size,
-            address,
-            store_address,
-            max_step,
-            max_rank,
-            max_world_size,
-            heal,
-        ) = self._client.quorum(
+        quorum = self._client.quorum(
             rank=self._rank,
             step=self._step,
-            checkpoint_server_addr=self._ckpt_server.address(),
+            checkpoint_metadata=self._checkpoint_transport.metadata(),
             shrink_only=shrink_only,
             timeout=quorum_timeout,
         )
+
+        quorum_id = quorum.quorum_id
+        replica_rank = quorum.replica_rank
+        replica_world_size = quorum.replica_world_size
+        recover_src_manager_address = quorum.recover_src_manager_address
+        store_address = quorum.store_address
+        max_step = quorum.max_step
+        max_rank = quorum.max_rank
+        max_world_size = quorum.max_world_size
+        heal = quorum.heal
 
         # When using async quorum we need to take the recovered workers.
         # When not using async quorum we need to take the max world size as all
@@ -470,29 +472,54 @@ class Manager:
             self._pg.configure(store_prefixed_addr, replica_rank, replica_world_size)
             self._quorum_id = quorum_id
 
-        # See manager.rs for healing conditions
-        if heal and allow_heal:
-            self._healing = True
-            self._logger.info(
-                f"healing required, fetching checkpoint server address from {address=} {max_step=}"
-            )
-            primary_client = ManagerClient(
-                address, connect_timeout=self._connect_timeout
-            )
-            checkpoint_server_address = primary_client.checkpoint_address(
-                self._rank, timeout=self._timeout
-            )
+        if allow_heal:
+            if quorum.recover_dst_ranks:
+                self._logger.info(
+                    f"peers need recovery from us {quorum.recover_dst_ranks}"
+                )
+                self._checkpoint_transport.send_checkpoint(
+                    dst_ranks=quorum.recover_dst_ranks,
+                    step=max_step,
+                    state_dict=self._manager_state_dict(),
+                    timeout=self._timeout,
+                )
 
-            self._logger.info(f"fetching checkpoint from {checkpoint_server_address=}")
-            self._pending_state_dict = CheckpointServer.load_from_address(
-                checkpoint_server_address, timeout=self._timeout
-            )
-            self.load_state_dict(self._pending_state_dict["torchft"])
-            # we apply the user state dict only when safe from the main thread
+            # See manager.rs for healing conditions
+            if heal:
+                self._healing = True
+                self._logger.info(
+                    f"healing required, fetching checkpoint metadata from {recover_src_manager_address=} {max_step=}"
+                )
+                primary_client = ManagerClient(
+                    recover_src_manager_address, connect_timeout=self._connect_timeout
+                )
+                checkpoint_metadata = primary_client.checkpoint_metadata(
+                    self._rank, timeout=self._timeout
+                )
+                recover_src_rank = quorum.recover_src_rank
+                assert (
+                    recover_src_rank is not None
+                ), "must have a recover rank when healing"
 
-            # This isn't strictly needed as loading the state_dict above should
-            # restore the correct step but it makes writing tests simpler.
-            self._step = max_step
+                self._logger.info(
+                    f"fetching checkpoint from {recover_src_rank=} with {checkpoint_metadata=}"
+                )
+
+                # we apply the user state dict only when safe from the main thread
+                # save it for now
+                self._pending_state_dict = self._checkpoint_transport.recv_checkpoint(
+                    src_rank=recover_src_rank,
+                    metadata=checkpoint_metadata,
+                    step=max_step,
+                    timeout=self._timeout,
+                )
+
+                # pyre-fixme[6]: got object
+                self.load_state_dict(self._pending_state_dict["torchft"])
+
+                # This isn't strictly needed as loading the state_dict above should
+                # restore the correct step but it makes writing tests simpler.
+                self._step = max_step
 
     def _apply_pending_state_dict(self) -> None:
         assert self._healing, "must be in healing state"
@@ -553,7 +580,7 @@ class Manager:
             f"should_commit={should_commit} enough_replicas={enough_replicas}, errored={self._errored}"
         )
 
-        self._ckpt_server.disallow_checkpoint()
+        self._checkpoint_transport.disallow_checkpoint()
 
         # decide whether we're in a healthy state to increase the step count
         if should_commit:
@@ -573,6 +600,12 @@ class Manager:
         """
         self._step = state_dict["step"]
         self._batches_committed = state_dict["batches_committed"]
+
+    def _manager_state_dict(self) -> Dict[str, object]:
+        return {
+            "user": self._user_state_dict(),
+            "torchft": self.state_dict(),
+        }
 
     def state_dict(self) -> Dict[str, int]:
         """

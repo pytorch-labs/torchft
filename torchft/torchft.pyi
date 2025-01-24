@@ -1,5 +1,5 @@
 from datetime import timedelta
-from typing import Optional, Tuple
+from typing import List, Optional
 
 class ManagerClient:
     def __init__(self, addr: str, connect_timeout: timedelta) -> None: ...
@@ -7,11 +7,11 @@ class ManagerClient:
         self,
         rank: int,
         step: int,
-        checkpoint_server_addr: str,
+        checkpoint_metadata: str,
         shrink_only: bool,
         timeout: timedelta,
-    ) -> Tuple[int, int, int, str, str, int, Optional[int], int, bool]: ...
-    def checkpoint_address(self, rank: int, timeout: timedelta) -> str: ...
+    ) -> QuorumResult: ...
+    def checkpoint_metadata(self, rank: int, timeout: timedelta) -> str: ...
     def should_commit(
         self,
         rank: int,
@@ -19,6 +19,19 @@ class ManagerClient:
         should_commit: bool,
         timeout: timedelta,
     ) -> bool: ...
+
+class QuorumResult:
+    quorum_id: int
+    replica_rank: int
+    replica_world_size: int
+    recover_src_manager_address: str
+    recover_src_rank: Optional[int]
+    recover_dst_ranks: List[int]
+    store_address: str
+    max_step: int
+    max_rank: Optional[int]
+    max_world_size: int
+    heal: bool
 
 class Manager:
     def __init__(

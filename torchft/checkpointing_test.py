@@ -18,26 +18,40 @@ class TestCheckpointing(TestCase):
         state_dict_fn = MagicMock()
         state_dict_fn.return_value = expected
         server = CheckpointServer(
-            state_dict=state_dict_fn,
             timeout=timedelta(seconds=10),
         )
 
-        server.disallow_checkpoint()
-        server.allow_checkpoint(1234)
+        server.send_checkpoint(
+            dst_ranks=[],
+            step=1234,
+            state_dict=expected,
+            timeout=timedelta(seconds=10),
+        )
 
-        addr = server.address()
+        metadata = server.metadata()
 
-        out = CheckpointServer.load_from_address(addr, timeout=timedelta(seconds=10))
+        out = server.recv_checkpoint(
+            src_rank=0, metadata=metadata, step=1234, timeout=timedelta(seconds=10)
+        )
         self.assertEqual(out, expected)
 
         # test timeout
         with self.assertRaisesRegex(urllib.error.URLError, r"urlopen error"):
-            CheckpointServer.load_from_address(addr, timeout=timedelta(seconds=0.0))
+            server.recv_checkpoint(
+                src_rank=0, metadata=metadata, step=1234, timeout=timedelta(seconds=0.0)
+            )
 
         # test mismatch case
-        server.allow_checkpoint(2345)
+        server.send_checkpoint(
+            dst_ranks=[],
+            step=2345,
+            state_dict=expected,
+            timeout=timedelta(seconds=10),
+        )
 
         with self.assertRaisesRegex(urllib.error.HTTPError, r"Error 400"):
-            CheckpointServer.load_from_address(addr, timeout=timedelta(seconds=10))
+            server.recv_checkpoint(
+                src_rank=0, metadata=metadata, step=1234, timeout=timedelta(seconds=10)
+            )
 
         server.shutdown()

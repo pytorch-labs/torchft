@@ -26,7 +26,7 @@ use crate::torchftpb::lighthouse_service_client::LighthouseServiceClient;
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
 use crate::torchftpb::{
     manager_service_server::{ManagerService, ManagerServiceServer},
-    CheckpointAddressRequest, CheckpointAddressResponse, KillRequest, KillResponse,
+    CheckpointMetadataRequest, CheckpointMetadataResponse, KillRequest, KillResponse,
     LighthouseHeartbeatRequest, LighthouseQuorumRequest, ManagerQuorumRequest,
     ManagerQuorumResponse, Quorum, QuorumMember, ShouldCommitRequest, ShouldCommitResponse,
 };
@@ -38,7 +38,7 @@ use log::{info, warn};
 use std::{println as info, println as warn};
 
 struct ManagerState {
-    checkpoint_servers: HashMap<i64, String>,
+    checkpoint_metadata: HashMap<i64, String>,
     channel: broadcast::Sender<Quorum>,
     participants: HashSet<i64>,
 
@@ -104,7 +104,7 @@ impl Manager {
             world_size: world_size,
             heartbeat_interval: heartbeat_interval,
             state: Mutex::new(ManagerState {
-                checkpoint_servers: HashMap::new(),
+                checkpoint_metadata: HashMap::new(),
                 channel: tx,
                 participants: HashSet::new(),
 
@@ -237,8 +237,8 @@ impl ManagerService for Arc<Manager> {
             // save checkpoint server info for healing process
             // TODO: make separate call to set?
             state
-                .checkpoint_servers
-                .insert(req.rank, req.checkpoint_server_addr.clone());
+                .checkpoint_metadata
+                .insert(req.rank, req.checkpoint_metadata.clone());
 
             // TODO check step
             state.participants.insert(rank);
@@ -266,81 +266,28 @@ impl ManagerService for Arc<Manager> {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let mut participants = quorum.participants.clone();
-        participants.sort_by(|a, b| a.replica_id.cmp(&b.replica_id));
-
-        let replica_rank = participants.iter().enumerate().find_map(|(i, p)| {
-            if p.replica_id == self.replica_id {
-                Some(i)
-            } else {
-                None
-            }
-        });
-        if replica_rank.is_none() {
-            return Err(Status::not_found(format!(
-                "replica {} not participating in returned quorum",
-                self.replica_id
-            )));
-        }
-
-        let max_step = participants.iter().map(|p| p.step).max().unwrap();
-        let max_participants: Vec<&QuorumMember> =
-            participants.iter().filter(|p| p.step == max_step).collect();
-
-        let primary = max_participants[rank as usize % max_participants.len()];
-
-        let mut max_rank = None;
-        for (i, p) in max_participants.iter().enumerate() {
-            if p.replica_id == self.replica_id {
-                max_rank = Some(i as i64);
-                break;
-            }
-        }
-
-        // Decide whether we should be healing:
-        // 1. if we're not at the max step
-        // 2. if everyone is at the first step and we're not the primary
-        let heal = max_step != req.step || max_step == 0 && primary.replica_id != self.replica_id;
-        if heal {
-            info!(
-                "healing is required step={}, max_step={}",
-                req.step, max_step
-            );
-        }
-
-        let reply = ManagerQuorumResponse {
-            quorum_id: quorum.quorum_id,
-            // address is used for looking up the checkpoint server address.
-            address: primary.address.clone(),
-            store_address: primary.store_address.clone(),
-            max_step: max_step,
-            max_rank: max_rank,
-            max_world_size: max_participants.len() as i64,
-            replica_rank: replica_rank.unwrap() as i64,
-            replica_world_size: participants.len() as i64,
-            heal: heal,
-        };
-
         info!("returning quorum for rank {}", rank);
+
+        let reply = compute_quorum_results(&self.replica_id, rank, &quorum)?;
 
         Ok(Response::new(reply))
     }
 
-    async fn checkpoint_address(
+    async fn checkpoint_metadata(
         &self,
-        request: Request<CheckpointAddressRequest>,
-    ) -> Result<Response<CheckpointAddressResponse>, Status> {
+        request: Request<CheckpointMetadataRequest>,
+    ) -> Result<Response<CheckpointMetadataResponse>, Status> {
         let state = self.state.lock().await;
 
         let req = request.into_inner();
 
-        let address = state
-            .checkpoint_servers
+        let metadata = state
+            .checkpoint_metadata
             .get(&req.rank)
             .ok_or_else(|| Status::invalid_argument("rank not found"))?;
 
-        let reply = CheckpointAddressResponse {
-            checkpoint_server_address: address.clone(),
+        let reply = CheckpointMetadataResponse {
+            checkpoint_metadata: metadata.clone(),
         };
         Ok(Response::new(reply))
     }
@@ -405,6 +352,131 @@ impl ManagerService for Arc<Manager> {
         warn!("got kill request: {}", req.msg);
         std::process::exit(1);
     }
+}
+
+fn compute_quorum_results(
+    replica_id: &str,
+    rank: i64,
+    quorum: &Quorum,
+) -> Result<ManagerQuorumResponse, Status> {
+    let mut participants = quorum.participants.clone();
+    participants.sort_by(|a, b| a.replica_id.cmp(&b.replica_id));
+
+    // Compute the rank of the replica in the returned quorum.
+    let replica_rank = participants
+        .iter()
+        .enumerate()
+        .find_map(|(i, p)| {
+            if p.replica_id == replica_id {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            Status::not_found(format!(
+                "replica {} not participating in returned quorum",
+                replica_id
+            ))
+        })?;
+
+    let step = participants[replica_rank].step;
+
+    // Compute the details for workers at max step.
+    let max_step = participants.iter().map(|p| p.step).max().unwrap();
+    let max_participants: Vec<&QuorumMember> =
+        participants.iter().filter(|p| p.step == max_step).collect();
+    let max_rank = max_participants.iter().enumerate().find_map(|(i, p)| {
+        if p.replica_id == replica_id {
+            Some(i as i64)
+        } else {
+            None
+        }
+    });
+
+    // The primary TCPStore to use for this rank.
+    let primary_rank = rank as usize % max_participants.len();
+    let primary = max_participants[primary_rank];
+
+    // Compute recovery assignments
+
+    // Nodes are recovering if:
+    // 1. not at the max step
+    // 2. max_step == 0 and not the primary replica
+    let all_recover_dst_ranks: Vec<usize> = participants
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            if p.step != max_step || max_step == 0 && primary.replica_id != p.replica_id {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let all_recover_dst_ranks_set = all_recover_dst_ranks.iter().collect::<HashSet<_>>();
+    let up_to_date_ranks: Vec<usize> = participants
+        .iter()
+        .enumerate()
+        .filter_map(|(i, _p)| {
+            if !all_recover_dst_ranks_set.contains(&i) {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // This is a map of rank to the ranks that are recovering from that node.
+    let mut recovery_assignments: HashMap<usize, Vec<i64>> = HashMap::new();
+    // The rank of the node that this rank is recovering from.
+    let mut recover_src_rank: Option<i64> = None;
+    for (i, recovering_rank) in all_recover_dst_ranks.iter().enumerate() {
+        let up_to_date_idx = (i + rank as usize) % up_to_date_ranks.len();
+        let recovering_recover_src_rank = up_to_date_ranks[up_to_date_idx];
+        if !recovery_assignments.contains_key(&recovering_recover_src_rank) {
+            recovery_assignments.insert(recovering_recover_src_rank, Vec::new());
+        }
+        recovery_assignments
+            .get_mut(&recovering_recover_src_rank)
+            .unwrap()
+            .push(*recovering_rank as i64);
+        if *recovering_rank == replica_rank {
+            recover_src_rank = Some(recovering_recover_src_rank as i64);
+        }
+    }
+
+    let heal = recover_src_rank.is_some();
+    if heal {
+        info!(
+            "healing is required step={}, max_step={}, recover_src_rank={}",
+            step,
+            max_step,
+            recover_src_rank.unwrap()
+        );
+    }
+
+    let recover_src_manager_address = match recover_src_rank {
+        Some(r) => participants[r as usize].address.clone(),
+        None => "".to_string(),
+    };
+
+    Ok(ManagerQuorumResponse {
+        quorum_id: quorum.quorum_id,
+        // address is used for looking up the checkpoint server address.
+        recover_src_manager_address: recover_src_manager_address,
+        recover_src_rank: recover_src_rank,
+        recover_dst_ranks: recovery_assignments
+            .get(&replica_rank)
+            .map_or_else(Vec::new, |v| v.clone()),
+        store_address: primary.store_address.clone(),
+        max_step: max_step,
+        max_rank: max_rank,
+        max_world_size: max_participants.len() as i64,
+        replica_rank: replica_rank as i64,
+        replica_world_size: participants.len() as i64,
+        heal: heal,
+    })
 }
 
 #[cfg(test)]
@@ -506,7 +578,7 @@ mod tests {
         let mut request = tonic::Request::new(ManagerQuorumRequest {
             rank: 0,
             step: 123,
-            checkpoint_server_addr: "addr".to_string(),
+            checkpoint_metadata: "addr".to_string(),
             shrink_only: false,
         });
         request.set_timeout(Duration::from_secs(10));
@@ -516,7 +588,7 @@ mod tests {
         lighthouse_fut.abort();
 
         assert_eq!(resp.quorum_id, 1);
-        assert_eq!(resp.address, manager.address());
+        assert_eq!(resp.recover_src_manager_address, "".to_string());
         assert_eq!(resp.store_address, "store_addr".to_string());
         assert_eq!(resp.max_step, 123);
         assert_eq!(resp.max_rank, Some(0));
@@ -565,7 +637,7 @@ mod tests {
                 let mut request = tonic::Request::new(ManagerQuorumRequest {
                     rank: 0,
                     step: 0,
-                    checkpoint_server_addr: "addr".to_string(),
+                    checkpoint_metadata: "addr".to_string(),
                     shrink_only: false,
                 });
                 request.set_timeout(Duration::from_secs(10));
@@ -594,6 +666,185 @@ mod tests {
         assert_eq!(resp_b.replica_rank, 1);
         assert_eq!(resp_b.replica_world_size, 2);
         assert_eq!(resp_b.heal, true);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_metadata() -> Result<()> {
+        let lighthouse = Lighthouse::new(LighthouseOpt {
+            bind: "[::]:0".to_string(),
+            join_timeout_ms: 100,
+            min_replicas: 1,
+            quorum_tick_ms: 100,
+            heartbeat_timeout_ms: 5000,
+        })
+        .await?;
+        let lighthouse_fut = tokio::spawn(lighthouse.clone().run());
+
+        let manager = Manager::new(
+            "rep_id".to_string(),
+            lighthouse.address(),
+            "localhost".to_string(),
+            "[::]:0".to_string(),
+            "store_addr".to_string(),
+            1,                          // world size
+            Duration::from_millis(100), // heartbeat interval
+            Duration::from_secs(10),    // connect timeout
+        )
+        .await?;
+        let manager_fut = tokio::spawn(manager.clone().run());
+
+        let mut client = manager_client_new(manager.address(), Duration::from_secs(10)).await?;
+
+        let request = tonic::Request::new(CheckpointMetadataRequest { rank: 0 });
+        let resp = client.checkpoint_metadata(request).await;
+        assert!(resp.err().unwrap().to_string().contains("rank not found"));
+
+        {
+            let mut state = manager.state.lock().await;
+
+            state.checkpoint_metadata.insert(0, "addr".to_string());
+        }
+
+        let request = tonic::Request::new(CheckpointMetadataRequest { rank: 0 });
+        let resp = client.checkpoint_metadata(request).await?.into_inner();
+        assert_eq!(resp.checkpoint_metadata, "addr".to_string());
+
+        manager_fut.abort();
+        lighthouse_fut.abort();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compute_quorum_results_first_step() -> Result<()> {
+        let quorum = Quorum {
+            quorum_id: 1,
+            participants: vec![
+                QuorumMember {
+                    replica_id: "replica_0".to_string(),
+                    address: "addr_0".to_string(),
+                    store_address: "store_addr_0".to_string(),
+                    step: 0,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+                QuorumMember {
+                    replica_id: "replica_1".to_string(),
+                    address: "addr_1".to_string(),
+                    store_address: "store_addr_1".to_string(),
+                    step: 0,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+            ],
+            created: None,
+        };
+
+        // rank 0
+
+        let results = compute_quorum_results("replica_0", 0, &quorum)?;
+        assert!(!results.heal);
+        assert_eq!(results.replica_rank, 0);
+        assert_eq!(results.recover_src_rank, None);
+        assert_eq!(results.recover_dst_ranks, vec![1]);
+
+        let results = compute_quorum_results("replica_1", 0, &quorum)?;
+        assert!(results.heal);
+        assert_eq!(results.replica_rank, 1);
+        assert_eq!(results.recover_src_rank, Some(0));
+        assert_eq!(results.recover_dst_ranks, Vec::<i64>::new());
+
+        // rank 1 assignments should be offset from rank 0 above and the primary
+
+        let results = compute_quorum_results("replica_1", 1, &quorum)?;
+        assert!(!results.heal);
+        assert_eq!(results.replica_rank, 1);
+        assert_eq!(results.recover_src_rank, None);
+        assert_eq!(results.recover_dst_ranks, vec![0]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compute_quorum_results_recovery() -> Result<()> {
+        let quorum = Quorum {
+            quorum_id: 1,
+            participants: vec![
+                QuorumMember {
+                    replica_id: "replica_0".to_string(),
+                    address: "addr_0".to_string(),
+                    store_address: "store_addr_0".to_string(),
+                    step: 0,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+                QuorumMember {
+                    replica_id: "replica_1".to_string(),
+                    address: "addr_1".to_string(),
+                    store_address: "store_addr_1".to_string(),
+                    step: 1,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+                QuorumMember {
+                    replica_id: "replica_2".to_string(),
+                    address: "addr_2".to_string(),
+                    store_address: "store_addr_2".to_string(),
+                    step: 0,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+                QuorumMember {
+                    replica_id: "replica_3".to_string(),
+                    address: "addr_3".to_string(),
+                    store_address: "store_addr_3".to_string(),
+                    step: 1,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+                QuorumMember {
+                    replica_id: "replica_4".to_string(),
+                    address: "addr_4".to_string(),
+                    store_address: "store_addr_4".to_string(),
+                    step: 0,
+                    world_size: 1,
+                    shrink_only: false,
+                },
+            ],
+            created: None,
+        };
+
+        // rank 0
+
+        let results = compute_quorum_results("replica_0", 0, &quorum)?;
+        assert!(results.heal);
+        assert_eq!(results.recover_src_manager_address, "addr_1".to_string());
+        assert_eq!(results.replica_rank, 0);
+        assert_eq!(results.recover_src_rank, Some(1));
+        assert!(results.recover_dst_ranks.is_empty());
+
+        let results = compute_quorum_results("replica_1", 0, &quorum)?;
+        assert!(!results.heal);
+        assert_eq!(results.recover_src_manager_address, "".to_string());
+        assert_eq!(results.replica_rank, 1);
+        assert_eq!(results.recover_src_rank, None);
+        assert_eq!(results.recover_dst_ranks, vec![0, 4]);
+
+        let results = compute_quorum_results("replica_3", 0, &quorum)?;
+        assert!(!results.heal);
+        assert_eq!(results.replica_rank, 3);
+        assert_eq!(results.recover_src_rank, None);
+        assert_eq!(results.recover_dst_ranks, vec![2]);
+
+        // rank 1 assignments should be offset from rank 0 above
+
+        let results = compute_quorum_results("replica_1", 1, &quorum)?;
+        assert!(!results.heal);
+        assert_eq!(results.replica_rank, 1);
+        assert_eq!(results.recover_src_rank, None);
+        assert_eq!(results.recover_dst_ranks, vec![2]);
 
         Ok(())
     }

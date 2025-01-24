@@ -159,7 +159,7 @@ def ddp_train_loop(
             # pyre-fixme[6]: Incompatible parameter type
             **runner.manager_args,
         )
-        stack.callback(manager.shutdown)
+        stack.callback(lambda: manager.shutdown(wait=False))
 
         m: nn.Module = DistributedDataParallel(manager, MyModel())
         optimizer: optim.Optimizer = OptimizerWrapper(
@@ -223,7 +223,7 @@ def local_sgd_train_loop(
             # pyre-fixme[6]: Incompatible parameter type
             **runner.manager_args,
         )
-        stack.callback(manager.shutdown)
+        stack.callback(lambda: manager.shutdown(wait=False))
 
         m: nn.Module = MyModel()
         optimizer: optim.Optimizer = optim.Adam(m.parameters())
@@ -460,7 +460,7 @@ class ManagerIntegTest(TestCase):
                 port=19530,
                 use_async_quorum=False,
             )
-            stack.callback(manager.shutdown)
+            stack.callback(lambda: manager.shutdown(wait=False))
 
             with self.assertElapsedLessThan(1.0):
                 with self.assertRaisesRegex(

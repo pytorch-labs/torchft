@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from datetime import timedelta
+from typing import Optional
 from unittest import TestCase
 from unittest.mock import MagicMock, create_autospec, patch
 
@@ -13,7 +14,7 @@ from torch.distributed import TCPStore
 
 from torchft.manager import MANAGER_ADDR_KEY, REPLICA_ID_KEY, Manager, WorldSizeMode
 from torchft.process_group import ProcessGroup, _DummyWork
-from torchft.torchft import ManagerClient
+from torchft.torchft import QuorumResult
 
 
 def mock_should_commit(
@@ -25,13 +26,19 @@ def mock_should_commit(
 class TestManager(TestCase):
     store: TCPStore  # pyre-fixme[13]: never initialized
     load_state_dict: MagicMock  # pyre-fixme[13]: never initialized
+    manager: Optional[Manager]  # pyre-fixme[13]: never initialized
+
+    def tearDown(self) -> None:
+        manager = self.manager
+        if manager is not None:
+            manager.shutdown(wait=False)
 
     def _create_manager(
         self,
         use_async_quorum: bool = True,
         min_replica_size: int = 2,
         world_size_mode: WorldSizeMode = WorldSizeMode.DYNAMIC,
-        timeout: timedelta = timedelta(seconds=60),
+        timeout: timedelta = timedelta(seconds=10),
     ) -> Manager:
         pg = create_autospec(ProcessGroup)
         self.store = TCPStore(
@@ -58,6 +65,7 @@ class TestManager(TestCase):
                 world_size_mode=world_size_mode,
                 timeout=timeout,
             )
+            self.manager = manager
         return manager
 
     @patch("torchft.manager.ManagerClient", autospec=True)
@@ -92,17 +100,18 @@ class TestManager(TestCase):
         manager = self._create_manager()
         client_mock().should_commit = mock_should_commit
 
-        client_mock().quorum.return_value = (
-            123,  # quorum_id
-            1,  # replica_rank
-            2,  # replica_world
-            "manager address",
-            f"localhost:{self.store.port}",
-            1,  # max_step
-            1,  # max_rank
-            2,  # max_world_size
-            False,  # heal
-        )
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 1
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 1
+        quorum.max_rank = 1
+        quorum.max_world_size = 2
+        quorum.heal = False
+
+        client_mock().quorum.return_value = quorum
 
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager.current_step(), 0)
@@ -127,21 +136,30 @@ class TestManager(TestCase):
         manager = self._create_manager(use_async_quorum=False)
         client_mock().should_commit = mock_should_commit
 
-        client_mock().quorum.return_value = (
-            123,  # quorum_id
-            1,  # replica_rank
-            2,  # replica_world
-            "manager address",
-            f"localhost:{self.store.port}",
-            20,  # max_step
-            None,  # max_rank
-            2,  # max_world_size
-            True,  # heal
-        )
-        # forcible increment checkpoint server to compute correct address
-        manager._ckpt_server.allow_checkpoint(manager.current_step())
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 1
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.recover_src_rank = 0
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 20
+        quorum.max_rank = None
+        quorum.max_world_size = 2
+        quorum.heal = True
 
-        client_mock().checkpoint_address.return_value = manager._ckpt_server.address()
+        client_mock().quorum.return_value = quorum
+
+        # forcible increment checkpoint server to compute correct address
+        manager._checkpoint_transport.send_checkpoint(
+            dst_ranks=[],
+            step=quorum.max_step,
+            state_dict=manager._manager_state_dict(),
+            timeout=timedelta(seconds=10),
+        )
+        client_mock().checkpoint_metadata.return_value = (
+            manager._checkpoint_transport.metadata()
+        )
 
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager.current_step(), 0)
@@ -169,21 +187,30 @@ class TestManager(TestCase):
         manager = self._create_manager(use_async_quorum=True, min_replica_size=2)
         client_mock().should_commit = mock_should_commit
 
-        client_mock().quorum.return_value = (
-            123,  # quorum_id
-            1,  # replica_rank
-            2,  # replica_world
-            "manager address",
-            f"localhost:{self.store.port}",
-            20,  # max_step
-            None,  # max_rank
-            1,  # max_world_size
-            True,  # heal
-        )
-        # forcible increment checkpoint server to compute correct address
-        manager._ckpt_server.allow_checkpoint(manager.current_step())
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 1
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.recover_src_rank = 0
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 20
+        quorum.max_rank = None
+        quorum.max_world_size = 1
+        quorum.heal = True
 
-        client_mock().checkpoint_address.return_value = manager._ckpt_server.address()
+        client_mock().quorum.return_value = quorum
+
+        # forcible increment checkpoint server to compute correct address
+        manager._checkpoint_transport.send_checkpoint(
+            dst_ranks=[],
+            step=quorum.max_step,
+            state_dict=manager._manager_state_dict(),
+            timeout=timedelta(seconds=10),
+        )
+        client_mock().checkpoint_metadata.return_value = (
+            manager._checkpoint_transport.metadata()
+        )
 
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager.current_step(), 0)
@@ -212,6 +239,7 @@ class TestManager(TestCase):
         self.assertEqual(self.load_state_dict.call_count, 1)
 
         # failed to commit so no step
+        quorum.heal = False
         manager.start_quorum()
         self.assertEqual(manager.current_step(), 20)
         self.assertEqual(manager.batches_committed(), 0)
@@ -221,21 +249,30 @@ class TestManager(TestCase):
         manager = self._create_manager(use_async_quorum=True, min_replica_size=1)
         client_mock().should_commit = mock_should_commit
 
-        client_mock().quorum.return_value = (
-            123,  # quorum_id
-            1,  # replica_rank
-            2,  # replica_world
-            "manager address",
-            f"localhost:{self.store.port}",
-            20,  # max_step
-            None,  # max_rank
-            1,  # max_world_size
-            True,  # heal
-        )
-        # forceable increment checkpoint server to compute correct address
-        manager._ckpt_server.allow_checkpoint(manager.current_step())
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 1
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.recover_src_rank = 0
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 20
+        quorum.max_rank = None
+        quorum.max_world_size = 1
+        quorum.heal = True
 
-        client_mock().checkpoint_address.return_value = manager._ckpt_server.address()
+        client_mock().quorum.return_value = quorum
+
+        # forceable increment checkpoint server to compute correct address
+        manager._checkpoint_transport.send_checkpoint(
+            dst_ranks=[],
+            step=quorum.max_step,
+            state_dict=manager._manager_state_dict(),
+            timeout=timedelta(seconds=10),
+        )
+        client_mock().checkpoint_metadata.return_value = (
+            manager._checkpoint_transport.metadata()
+        )
 
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager.current_step(), 0)
@@ -261,6 +298,8 @@ class TestManager(TestCase):
 
         self.assertEqual(self.load_state_dict.call_count, 1)
 
+        # healed
+        quorum.heal = False
         manager.start_quorum()
         self.assertEqual(manager.current_step(), 21)
         self.assertEqual(manager.batches_committed(), 1)
@@ -270,17 +309,18 @@ class TestManager(TestCase):
         manager = self._create_manager()
         client_mock().should_commit = mock_should_commit
 
-        client_mock().quorum.return_value = (
-            123,  # quorum_id
-            1,  # replica_rank
-            2,  # replica_world
-            "manager address",
-            f"localhost:{self.store.port}",
-            1,  # max_step
-            1,  # max_rank
-            2,  # max_world_size
-            False,  # heal
-        )
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 1
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 1
+        quorum.max_rank = 1
+        quorum.max_world_size = 2
+        quorum.heal = False
+
+        client_mock().quorum.return_value = quorum
 
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager.current_step(), 0)
@@ -308,17 +348,8 @@ class TestManager(TestCase):
         manager._pg.allreduce.side_effect = None
 
         # inject failure when worked waited
-        client_mock().quorum.return_value = (
-            123,  # quorum_id
-            1,  # replica_rank
-            2,  # replica_world
-            "manager address",
-            f"localhost:{self.store.port}",
-            2,  # max_step
-            1,  # max_rank
-            2,  # max_world_size
-            False,  # heal
-        )
+        quorum.max_step = 2
+
         manager.start_quorum()
 
         self.assertFalse(manager._errored)
@@ -336,17 +367,7 @@ class TestManager(TestCase):
         manager._pg.allreduce.reset_mock(return_value=True)
 
         # recover on next step
-        client_mock().quorum.return_value = (
-            123,  # quorum_id
-            1,  # replica_rank
-            2,  # replica_world_size
-            "manager address",
-            f"localhost:{self.store.port}",
-            3,  # max_step
-            1,  # max_rank
-            2,  # max_world_size
-            False,  # heal
-        )
+        quorum.max_step = 3
 
         manager.start_quorum()
         manager.allreduce(torch.tensor([1.0])).wait()
@@ -362,17 +383,18 @@ class TestManager(TestCase):
             )
             client_mock().should_commit = mock_should_commit
 
-            client_mock().quorum.return_value = (
-                123,  # quorum_id
-                rank,  # replica_rank
-                3,  # replica_world
-                "manager address",
-                f"localhost:{self.store.port}",
-                1,  # max_step
-                rank,  # max_rank
-                3,  # max_world_size
-                False,  # heal
-            )
+            quorum = QuorumResult()
+            quorum.quorum_id = 123
+            quorum.replica_rank = rank
+            quorum.replica_world_size = 3
+            quorum.recover_src_manager_address = "manager address"
+            quorum.store_address = f"localhost:{self.store.port}"
+            quorum.max_step = 1
+            quorum.max_rank = rank
+            quorum.max_world_size = 3
+            quorum.heal = False
+
+            client_mock().quorum.return_value = quorum
 
             self.assertEqual(manager._quorum_id, -1)
             self.assertEqual(manager.current_step(), 0)
@@ -395,17 +417,18 @@ class TestManager(TestCase):
         )
         client_mock().should_commit = mock_should_commit
 
-        client_mock().quorum.return_value = (
-            123,  # quorum_id
-            0,  # replica_rank
-            3,  # replica_world
-            "manager address",
-            f"localhost:{self.store.port}",
-            1,  # max_step
-            None,  # max_rank
-            2,  # max_world_size
-            True,  # heal
-        )
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 0
+        quorum.replica_world_size = 3
+        quorum.recover_src_manager_address = "manager address"
+        quorum.recover_src_rank = 1
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 1
+        quorum.max_rank = None
+        quorum.max_world_size = 2
+        quorum.heal = True
+        client_mock().quorum.return_value = quorum
 
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager.current_step(), 0)
@@ -492,17 +515,18 @@ class TestManager(TestCase):
     def test_quorum_happy_timeouts(self, client_mock: MagicMock) -> None:
         manager = self._create_manager(use_async_quorum=False)
 
-        client_mock().quorum.return_value = (
-            123,  # quorum_id
-            1,  # replica_rank
-            2,  # replica_world
-            "manager address",
-            f"localhost:{self.store.port}",
-            1,  # max_step
-            1,  # max_rank
-            2,  # max_world_size
-            False,  # heal
-        )
+        quorum = QuorumResult()
+        quorum.quorum_id = 123
+        quorum.replica_rank = 1
+        quorum.replica_world_size = 2
+        quorum.recover_src_manager_address = "manager address"
+        quorum.store_address = f"localhost:{self.store.port}"
+        quorum.max_step = 1
+        quorum.max_rank = 1
+        quorum.max_world_size = 2
+        quorum.heal = False
+
+        client_mock().quorum.return_value = quorum
 
         manager.start_quorum(timeout=timedelta(seconds=12))
         self.assertEqual(

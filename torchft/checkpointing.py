@@ -16,9 +16,10 @@ import logging
 import socket
 import threading
 import urllib.request
+from abc import ABC, abstractmethod
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler
-from typing import Callable, Generic, TypeVar
+from typing import Generic, List, Optional, TypeVar
 
 import torch
 
@@ -29,7 +30,64 @@ logger: logging.Logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
-class CheckpointServer(Generic[T]):
+class CheckpointTransport(Generic[T], ABC):
+    @abstractmethod
+    def metadata(self) -> str:
+        """
+        Returns a string that will be used by the remote CheckpointTransport to fetch the checkpoint.
+        """
+        ...
+
+    @abstractmethod
+    def send_checkpoint(
+        self, dst_ranks: List[int], step: int, state_dict: T, timeout: timedelta
+    ) -> None:
+        """
+        Sends the checkpoint, only called when there is a rank that is behind.
+
+        This may be async.
+
+        Args:
+            dst_ranks: the ranks to send to
+            step: the step number to send
+            state_dict: the state dict to send
+            timeout: the timeout to wait for the checkpoint to be sent
+        """
+        ...
+
+    def disallow_checkpoint(self) -> None:
+        """
+        Called after send_checkpoint to wait for the checkpoint to be sent.
+
+        Once this returns, the state_dict may be mutated so no further data should be sent.
+        """
+        ...
+
+    @abstractmethod
+    def recv_checkpoint(
+        self, src_rank: int, metadata: str, step: int, timeout: timedelta
+    ) -> T:
+        """
+        Receives the checkpoint from the given rank.
+
+        Args:
+            src_rank: the rank to receive the checkpoint from
+            metadata: the metadata returned by the remote CheckpointTransport
+            step: the step number to receive
+            timeout: the timeout to wait for the checkpoint
+        """
+        ...
+
+    def shutdown(self, wait: bool = True) -> None:
+        """
+        Called to shutdown the checkpoint transport.
+
+        Args:
+            wait: whether to wait for the transport to shutdown
+        """
+
+
+class CheckpointServer(CheckpointTransport[T]):
     """
     This is an HTTP server that can be used to transfer checkpoints
     between workers.
@@ -41,11 +99,12 @@ class CheckpointServer(Generic[T]):
         state_dict: a callable that returns the state dict to be transferred
     """
 
-    def __init__(self, state_dict: Callable[[], T], timeout: timedelta) -> None:
+    def __init__(self, timeout: timedelta) -> None:
         self._checkpoint_lock = threading.Lock()
         self._disallowed = False
         self._step = -1
         self._timeout = timeout
+        self._state_dict: Optional[T] = None
 
         ckpt_server = self
 
@@ -74,9 +133,9 @@ class CheckpointServer(Generic[T]):
                         self.send_header("Content-type", "application/octet-stream")
                         self.end_headers()
 
-                        sd = state_dict()
+                        state_dict = ckpt_server._state_dict
 
-                        torch.save(sd, self.wfile)
+                        torch.save(state_dict, self.wfile)
                 except Exception as e:
                     logger.exception(
                         f"Exception in checkpoint server when handling {self.path=}: {e}",
@@ -117,7 +176,7 @@ class CheckpointServer(Generic[T]):
 
     def address(self) -> str:
         """
-        Returns the HTTP address to fetch a checkpoint from this server at the current step.
+        Returns the HTTP address to fetch a checkpoint from this server. Step must be appended to the end of the address.
 
         Format: http://host:port/checkpoint/1234
 
@@ -125,7 +184,7 @@ class CheckpointServer(Generic[T]):
             an HTTP address
         """
         port = self._server.socket.getsockname()[1]
-        return f"http://{socket.gethostname()}:{port}/checkpoint/{self._step}"
+        return f"http://{socket.gethostname()}:{port}/checkpoint/"
 
     def _serve(self) -> None:
         try:
@@ -156,8 +215,28 @@ class CheckpointServer(Generic[T]):
             self._disallowed = False
             self._checkpoint_lock.release()
 
-    def shutdown(self) -> None:
+    def shutdown(self, wait: bool = True) -> None:
         """
         Shutdown the server.
         """
-        self._server.shutdown()
+        if not wait:
+            # hack for nonblocking shutdown of socketserver threads
+            # pyre-fixme[16]: no attribute `__shutdown_request`.
+            self._server.__shutdown_request = True
+        if wait:
+            self._server.shutdown()
+            self._thread.join()
+
+    def metadata(self) -> str:
+        return self.address()
+
+    def send_checkpoint(
+        self, dst_ranks: List[int], step: int, state_dict: T, timeout: timedelta
+    ) -> None:
+        self._state_dict = state_dict
+        self.allow_checkpoint(step)
+
+    def recv_checkpoint(
+        self, src_rank: int, metadata: str, step: int, timeout: timedelta
+    ) -> T:
+        return self.load_from_address(f"{metadata}{step}", timeout)

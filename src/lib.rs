@@ -27,7 +27,7 @@ pub mod torchftpb {
 }
 
 use crate::torchftpb::manager_service_client::ManagerServiceClient;
-use crate::torchftpb::{CheckpointAddressRequest, ManagerQuorumRequest, ShouldCommitRequest};
+use crate::torchftpb::{CheckpointMetadataRequest, ManagerQuorumRequest, ShouldCommitRequest};
 use pyo3::prelude::*;
 
 #[pyclass]
@@ -113,15 +113,15 @@ impl ManagerClient {
         py: Python<'_>,
         rank: i64,
         step: i64,
-        checkpoint_server_addr: String,
+        checkpoint_metadata: String,
         shrink_only: bool,
         timeout: Duration,
-    ) -> Result<(i64, i64, i64, String, String, i64, Option<i64>, i64, bool), StatusError> {
+    ) -> Result<QuorumResult, StatusError> {
         py.allow_threads(move || {
             let mut request = tonic::Request::new(ManagerQuorumRequest {
                 rank: rank,
                 step: step,
-                checkpoint_server_addr: checkpoint_server_addr,
+                checkpoint_metadata: checkpoint_metadata,
                 shrink_only: shrink_only,
             });
 
@@ -131,28 +131,30 @@ impl ManagerClient {
 
             let response = self.runtime.block_on(self.client.clone().quorum(request))?;
             let resp = response.into_inner();
-            Ok((
-                resp.quorum_id,
-                resp.replica_rank,
-                resp.replica_world_size,
-                resp.address,
-                resp.store_address,
-                resp.max_step,
-                resp.max_rank,
-                resp.max_world_size,
-                resp.heal,
-            ))
+            Ok(QuorumResult {
+                quorum_id: resp.quorum_id,
+                replica_rank: resp.replica_rank,
+                replica_world_size: resp.replica_world_size,
+                recover_src_manager_address: resp.recover_src_manager_address,
+                recover_src_rank: resp.recover_src_rank,
+                recover_dst_ranks: resp.recover_dst_ranks,
+                store_address: resp.store_address,
+                max_step: resp.max_step,
+                max_rank: resp.max_rank,
+                max_world_size: resp.max_world_size,
+                heal: resp.heal,
+            })
         })
     }
 
-    fn checkpoint_address(
+    fn checkpoint_metadata(
         &self,
         py: Python<'_>,
         rank: i64,
         timeout: Duration,
     ) -> Result<String, StatusError> {
         py.allow_threads(move || {
-            let mut request = tonic::Request::new(CheckpointAddressRequest { rank: rank });
+            let mut request = tonic::Request::new(CheckpointMetadataRequest { rank: rank });
 
             // This timeout is processed on the server side so we also enable
             // keep alives to detect server health.
@@ -160,9 +162,9 @@ impl ManagerClient {
 
             let response = self
                 .runtime
-                .block_on(self.client.clone().checkpoint_address(request))?;
+                .block_on(self.client.clone().checkpoint_metadata(request))?;
             let resp = response.into_inner();
-            Ok(resp.checkpoint_server_address)
+            Ok(resp.checkpoint_metadata)
         })
     }
 
@@ -191,6 +193,41 @@ impl ManagerClient {
             let resp = response.into_inner();
             Ok(resp.should_commit)
         })
+    }
+}
+
+#[pyclass(get_all, set_all)]
+struct QuorumResult {
+    quorum_id: i64,
+    replica_rank: i64,
+    replica_world_size: i64,
+    recover_src_manager_address: String,
+    recover_src_rank: Option<i64>,
+    recover_dst_ranks: Vec<i64>,
+    store_address: String,
+    max_step: i64,
+    max_rank: Option<i64>,
+    max_world_size: i64,
+    heal: bool,
+}
+
+#[pymethods]
+impl QuorumResult {
+    #[new]
+    fn new() -> Self {
+        Self {
+            quorum_id: 0,
+            replica_rank: 0,
+            replica_world_size: 1,
+            recover_src_manager_address: "".to_string(),
+            recover_src_rank: None,
+            recover_dst_ranks: Vec::new(),
+            store_address: "".to_string(),
+            max_step: 0,
+            max_rank: None,
+            max_world_size: 1,
+            heal: false,
+        }
     }
 }
 
@@ -319,6 +356,7 @@ fn torchft(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Manager>()?;
     m.add_class::<ManagerClient>()?;
     m.add_class::<Lighthouse>()?;
+    m.add_class::<QuorumResult>()?;
     m.add_function(wrap_pyfunction!(lighthouse_main, m)?)?;
 
     Ok(())

@@ -72,30 +72,32 @@ service LighthouseService {
 message ManagerQuorumRequest {
     int64 rank = 1;
     int64 step = 2;
-    string checkpoint_server_addr = 3;
+    string checkpoint_metadata = 3;
     bool shrink_only = 4;
 }
 
 message ManagerQuorumResponse {
     int64 quorum_id = 1;
-    string address = 2;
-    string store_address = 3;
+    string recover_src_manager_address = 2;
+    optional int64 recover_src_rank = 3;
+    repeated int64 recover_dst_ranks = 4;
+    string store_address = 5;
     // These are information for the replicas which are at the max step.
-    int64 max_step = 4;
-    optional int64 max_rank = 5;
-    int64 max_world_size = 6;
+    int64 max_step = 6;
+    optional int64 max_rank = 7;
+    int64 max_world_size = 8;
     // These are information for all replicas including behind replicas.
-    int64 replica_rank = 7;
-    int64 replica_world_size = 8;
-    bool heal = 9;
+    int64 replica_rank = 9;
+    int64 replica_world_size = 10;
+    bool heal = 11;
 }
 
-message CheckpointAddressRequest {
+message CheckpointMetadataRequest {
     int64 rank = 1;
 }
 
-message CheckpointAddressResponse {
-    string checkpoint_server_address = 1;
+message CheckpointMetadataResponse {
+    string checkpoint_metadata = 1;
 }
 
 message ShouldCommitRequest {
@@ -114,7 +116,7 @@ message KillResponse {}
 
 service ManagerService {
     rpc Quorum (ManagerQuorumRequest) returns (ManagerQuorumResponse);
-    rpc CheckpointAddress(CheckpointAddressRequest) returns (CheckpointAddressResponse);
+    rpc CheckpointMetadata(CheckpointMetadataRequest) returns (CheckpointMetadataResponse);
     rpc ShouldCommit(ShouldCommitRequest) returns (ShouldCommitResponse);
     rpc Kill(KillRequest) returns (KillResponse);
 }
