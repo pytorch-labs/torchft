@@ -134,8 +134,10 @@ class CheckpointServer(CheckpointTransport[T]):
                         self.end_headers()
 
                         state_dict = ckpt_server._state_dict
-
+                        self._logger.warning("Before torch.save ===================.")
                         torch.save(state_dict, self.wfile)
+                        self._logger.warning("After torch.save ===================.")
+
                 except Exception as e:
                     logger.exception(
                         f"Exception in checkpoint server when handling {self.path=}: {e}",
@@ -172,7 +174,7 @@ class CheckpointServer(CheckpointTransport[T]):
             data = f.read()
 
         reader = io.BytesIO(data)
-        return torch.load(reader, weights_only=True)
+        return torch.load(reader, weights_only=False)
 
     def address(self) -> str:
         """
