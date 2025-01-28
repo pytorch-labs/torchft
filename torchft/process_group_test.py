@@ -368,6 +368,7 @@ class ProcessGroupTest(TestCase):
 
         self.assertEqual(manager.report_error.call_count, 0)
         self.assertEqual(manager.wrap_future.call_count, 1)
+        self.assertEqual(manager.wait_quorum.call_count, 1)
 
 
 class DeviceMeshTest(TestCase):

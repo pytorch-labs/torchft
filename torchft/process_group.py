@@ -19,7 +19,6 @@ runtime users need to take care to not assume a static rank or world size.
 import logging
 import queue
 import threading
-from abc import ABC
 from datetime import timedelta
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Type, Union
 
@@ -507,6 +506,10 @@ class ManagedProcessGroup(ProcessGroupWrapper):
         self._manager = manager
 
     def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
+        # Ensure we have a valid quorum and are configured before trying to do
+        # any work.
+        self._manager.wait_quorum()
+
         if self._manager.errored() is not None:
             return _DummyWork(tensors)
 
