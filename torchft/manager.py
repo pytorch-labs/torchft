@@ -225,7 +225,7 @@ class Manager:
         self._participating_world_size: int = 0
 
     def set_state_dict_fns(
-        self, load_state_dict: Callable[T, None], state_dict: Callable[[], T]
+        self, load_state_dict: Callable[[T], None], state_dict: Callable[[], T]
     ) -> None:
         self._load_state_dict = load_state_dict
         self._user_state_dict = state_dict

@@ -172,7 +172,7 @@ class CheckpointServer(CheckpointTransport[T]):
             data = f.read()
 
         reader = io.BytesIO(data)
-        # We have to set weights_only to True as there are some non-tensor
+        # We have to set weights_only to False as there are some non-tensor
         # states like lr_scheduler.
         return torch.load(reader, weights_only=False)
 
