@@ -7,13 +7,13 @@
 from datetime import timedelta
 from typing import Optional
 from unittest import TestCase
-from unittest.mock import MagicMock, create_autospec, patch
+from unittest.mock import create_autospec, MagicMock, patch
 
 import torch
 from torch.distributed import TCPStore
 
-from torchft.manager import MANAGER_ADDR_KEY, REPLICA_ID_KEY, Manager, WorldSizeMode
-from torchft.process_group import ProcessGroup, _DummyWork
+from torchft.manager import Manager, MANAGER_ADDR_KEY, REPLICA_ID_KEY, WorldSizeMode
+from torchft.process_group import _DummyWork, ProcessGroup
 from torchft.torchft import QuorumResult
 
 
@@ -94,6 +94,37 @@ class TestManager(TestCase):
         )
         self.assertEqual(manager.current_step(), 1234)
         self.assertEqual(manager.batches_committed(), 2345)
+
+    @patch("torchft.manager.ManagerClient", autospec=True)
+    def test_user_state_dict(self, client_mock: MagicMock) -> None:
+        manager = self._create_manager()
+
+        self.assertEqual(
+            manager._manager_state_dict(),
+            {
+                "user": {},
+                "torchft": {
+                    "step": 0,
+                    "batches_committed": 0,
+                },
+            },
+        )
+
+        manager.set_state_dict_fns(
+            self.load_state_dict,
+            lambda: {"new_state": 1},
+        )
+
+        self.assertEqual(
+            manager._manager_state_dict(),
+            {
+                "user": {"new_state": 1},
+                "torchft": {
+                    "step": 0,
+                    "batches_committed": 0,
+                },
+            },
+        )
 
     @patch("torchft.manager.ManagerClient", autospec=True)
     def test_quorum_happy(self, client_mock: MagicMock) -> None:
