@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
 import io
 import multiprocessing
 import os
@@ -87,14 +88,15 @@ def _test_pg(
                 check_tensors(item)
 
     # Test collectives
-    collectives = {
-        "allreduce": ([input_tensor], AllreduceOptions()),
-        "allgather": (output_tensors, [input_tensor], AllgatherOptions()),
-        "broadcast": (tensor_list, BroadcastOptions()),
-        "broadcast_one": (input_tensor, 0),
-    }
+    collectives = [
+        ("allreduce", ([input_tensor], AllreduceOptions())),
+        ("allreduce", ([input_tensor], ReduceOp.SUM)),
+        ("allgather", (output_tensors, [input_tensor], AllgatherOptions())),
+        ("broadcast", (tensor_list, BroadcastOptions())),
+        ("broadcast_one", (input_tensor, 0)),
+    ]
     works: Dict[str, dist._Work] = {}
-    for coll_str, args in collectives.items():
+    for coll_str, args in collectives:
         coll = getattr(pg, coll_str)
         work = coll(*args)
         works[coll_str] = work
@@ -247,6 +249,23 @@ class ProcessGroupTest(TestCase):
         assert p_2 is not None
         self.assertTrue(p_2.is_alive())
 
+    def test_baby_gloo_apis(self) -> None:
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+
+        store_addr = f"localhost:{store.port}/prefix"
+
+        a = ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
+        a.configure(store_addr, 0, 1)
+
+        _test_pg(a)
+
+        # force collection to ensure no BabyWork objects remain
+        gc.collect()
+
+        self.assertEqual(a.num_active_work(), 0)
+
     def test_dummy(self) -> None:
         pg = ProcessGroupDummy(0, 1)
         m = nn.Linear(3, 4)
@@ -368,5 +387,52 @@ class ProcessGroupTest(TestCase):
         self.assertIsInstance(list(works.values())[0], _ManagedWork)
 
         self.assertEqual(manager.report_error.call_count, 0)
-        self.assertEqual(manager.wrap_future.call_count, 1)
-        self.assertEqual(manager.wait_quorum.call_count, 1)
+        self.assertEqual(manager.wrap_future.call_count, 2)
+        self.assertEqual(manager.wait_quorum.call_count, 2)
+
+
+class DeviceMeshTest(TestCase):
+    @staticmethod
+    def _test_init_device_mesh(world_size: int, rank: int) -> None:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(12346)
+        os.environ["RANK"] = str(rank)
+        os.environ["WORLD_SIZE"] = str(4)
+
+        testcase = TestCase()
+
+        manager = Mock(spec=Manager)
+        # Even though we only have 4 workers, we can still initialize (2, 4) mesh.
+        # That's because the replicate group is NOT phystically created in the
+        # real mesh but is virtually added to the mesh via ManagedDeviceMesh.
+        device_mesh = ft_init_device_mesh(
+            device_type="cpu",
+            mesh_shape=(2, world_size),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+            replicate_dim=0,
+            manager=manager,
+        )
+
+        testcase.assertTrue(
+            isinstance(device_mesh.get_group("dp_replicate"), ManagedProcessGroup)
+        )
+        testcase.assertTrue(
+            not isinstance(device_mesh.get_group("dp_shard"), ManagedProcessGroup)
+        )
+        replicate_group = device_mesh.get_group("dp_replicate")
+        testcase.assertEqual(
+            cast(ManagedProcessGroup, replicate_group)._manager, manager
+        )
+        replicate_mesh = device_mesh["dp_replicate"]
+        testcase.assertEqual(replicate_mesh.get_group(), replicate_group)
+        flatten_mesh = device_mesh._flatten("dp")
+        manager.num_participants.return_value = 1
+        testcase.assertEqual(flatten_mesh.size(), world_size)
+        testcase.assertEqual(flatten_mesh.get_local_rank(), dist.get_rank())
+
+    def test_init_device_mesh(self) -> None:
+        with ProcessPoolExecutor(max_workers=4) as executor:
+            futures = []
+            for i in range(4):
+                future = executor.submit(self._test_init_device_mesh, 4, i)
+                futures.append(future)

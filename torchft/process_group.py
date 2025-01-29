@@ -19,8 +19,21 @@ runtime users need to take care to not assume a static rank or world size.
 import logging
 import queue
 import threading
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    cast,
+)
 
 import torch
 import torch.distributed as dist
@@ -29,7 +42,6 @@ import torch.multiprocessing as mp
 # pyre-fixme[21]: no attribute ProcessGroupNCCL
 # pyre-fixme[21]: no attribute ProcessGroupGloo
 from torch.distributed import (
-    BroadcastOptions,
     DeviceMesh,
     PrefixStore,
     ProcessGroup as BaseProcessGroup,
@@ -40,7 +52,14 @@ from torch.distributed import (
     get_rank,
     init_device_mesh,
 )
-from torch.distributed.distributed_c10d import Work, _world
+from torch.distributed.distributed_c10d import (
+    AllgatherOptions,
+    AllreduceOptions,
+    BroadcastOptions,
+    ReduceOp,
+    Work,
+    _world,
+)
 from torch.futures import Future
 
 if TYPE_CHECKING:
@@ -52,6 +71,9 @@ logger: logging.Logger = logging.getLogger(__name__)
 _QUEUE_CLOSE = "queue_close"
 _FUTURE_RESULT = "fut_result"
 _FUTURE_EXCEPTION = "fut_exception"
+
+
+T = TypeVar("T")
 
 
 def _get(q: mp.Queue, timeout: Union[float, timedelta]) -> object:
@@ -122,7 +144,9 @@ class ProcessGroup(BaseProcessGroup):
         raise NotImplementedError("not implemented")
 
     # pyre-fixme[14]: inconsistent override
-    def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
+    def allreduce(
+        self, tensors: List[torch.Tensor], opts: Union[AllreduceOptions, ReduceOp]
+    ) -> Work:
         raise NotImplementedError("not implemented")
 
     # pyre-fixme[14]: inconsistent override
@@ -130,7 +154,7 @@ class ProcessGroup(BaseProcessGroup):
         self,
         output_tensors: List[List[torch.Tensor]],
         input_tensor: List[torch.Tensor],
-        opts: object,
+        opts: AllgatherOptions,
     ) -> Work:
         """
         Gathers tensors from the whole group in a list.
@@ -140,7 +164,9 @@ class ProcessGroup(BaseProcessGroup):
         raise NotImplementedError("not implemented")
 
     # pyre-fixme[14]: inconsistent override
-    def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
+    def broadcast(
+        self, tensor_list: List[torch.Tensor], opts: BroadcastOptions
+    ) -> Work:
         """
         Broadcasts the tensor to the whole group.
 
@@ -567,6 +593,9 @@ class _BabyWork(Work):
     def get_future(self) -> Future[object]:
         return self._pg._get_future(self._op_id)
 
+    def __del__(self) -> None:
+        self._tx.put(("del", self._op_id), timeout=self._timeout)
+
 
 class _BabyWorkNCCL(_BabyWork):
     def wait(self, timeout: Optional[timedelta] = None) -> bool:
@@ -695,6 +724,7 @@ class ProcessGroupBaby(ProcessGroup):
                 cmd = op[0]
                 if cmd == "func":
                     func_name, args, kwargs = op[1:]
+                    args = _PickleSafeOptions.unsafe_args(args)
                     fn = getattr(pg, func_name)
                     work[next_op_id] = fn(*args, **kwargs)
                     tx.put(next_op_id)
@@ -702,8 +732,10 @@ class ProcessGroupBaby(ProcessGroup):
                 elif cmd == "wait":
                     op_id: int = op[1]
                     work[op_id].wait()
-                    del work[op_id]
                     tx.put(op_id)
+                elif cmd == "del":
+                    op_id: int = op[1]
+                    del work[op_id]
                 elif cmd == "future":
                     op_id: int = op[1]
 
@@ -731,6 +763,8 @@ class ProcessGroupBaby(ProcessGroup):
 
                     del work[op_id]
                     tx.put((op_id, event))
+                elif cmd == "num_active_work":
+                    tx.put(len(work))
                 else:
                     raise ValueError(f"unknown cmd: {cmd}")
 
@@ -775,7 +809,10 @@ class ProcessGroupBaby(ProcessGroup):
         assert rx is not None
         assert tx is not None
 
-        tx.put(("func", func, args, kwargs), timeout=self._timeout)
+        tx.put(
+            ("func", func, _PickleSafeOptions.safe_args(args), kwargs),
+            timeout=self._timeout,
+        )
 
         op_id = _get(rx, self._timeout)
         assert isinstance(op_id, int), f"invalid return {op_id}"
@@ -784,7 +821,11 @@ class ProcessGroupBaby(ProcessGroup):
             pg=self, tx=tx, rx=rx, op_id=op_id, timeout=self._timeout
         )
 
-    def allreduce(self, tensors: List[torch.Tensor], opts: object) -> Work:
+    def allreduce(
+        self,
+        tensors: List[torch.Tensor],
+        opts: Union[dist.AllreduceOptions, dist.ReduceOp],
+    ) -> Work:
         assert isinstance(tensors, list), "input must be list"
 
         for tensor in tensors:
@@ -793,8 +834,89 @@ class ProcessGroupBaby(ProcessGroup):
 
         return self._run_func("allreduce", tensors, opts)
 
+    def allgather(
+        self,
+        output_tensors: List[List[torch.Tensor]],
+        input_tensor: List[torch.Tensor],
+        opts: AllgatherOptions,
+    ) -> Work:
+        assert isinstance(output_tensors, list), "input must be list"
+        assert isinstance(input_tensor, list), "input must be list"
+
+        for tensor_list in output_tensors:
+            for tensor in tensor_list:
+                if not tensor.is_shared():
+                    tensor.share_memory_()
+
+        for tensor in input_tensor:
+            if not tensor.is_shared():
+                tensor.share_memory_()
+
+        return self._run_func("allgather", output_tensors, input_tensor, opts)
+
+    def broadcast(
+        self,
+        tensor_list: List[torch.Tensor],
+        opts: BroadcastOptions,
+    ) -> Work:
+        assert isinstance(tensor_list, list), "input must be list"
+
+        for tensor in tensor_list:
+            if not tensor.is_shared():
+                tensor.share_memory_()
+
+        return self._run_func("broadcast", tensor_list, opts)
+
     def size(self) -> int:
         return self._world_size
+
+    def num_active_work(self) -> int:
+        assert self._tx is not None
+        self._tx.put(("num_active_work",), timeout=self._timeout)
+
+        assert self._rx is not None
+        return cast(int, _get(self._rx, self._timeout))
+
+
+@dataclass
+class _PickleSafeOptions:
+    func: Callable[[], object]
+    fields: Dict[str, object]
+
+    @classmethod
+    def safe_args(cls, args: T) -> T:
+        if isinstance(args, tuple):
+            return tuple(cls.safe_args(arg) for arg in args)
+        elif isinstance(args, list):
+            return [cls.safe_args(arg) for arg in args]
+        elif isinstance(args, (AllreduceOptions, AllgatherOptions, BroadcastOptions)):
+            return cls.from_torch(args)
+        else:
+            return args
+
+    @classmethod
+    def unsafe_args(cls, args: T) -> T:
+        if isinstance(args, tuple):
+            return tuple(cls.unsafe_args(arg) for arg in args)
+        elif isinstance(args, list):
+            return [cls.unsafe_args(arg) for arg in args]
+        elif isinstance(args, cls):
+            return args.to_torch()
+        else:
+            return args
+
+    @classmethod
+    def from_torch(cls, opts: object) -> "_PickleSafeOptions":
+        return cls(
+            func=opts.__class__,
+            fields={k: getattr(opts, k) for k in dir(opts) if not k.startswith("_")},
+        )
+
+    def to_torch(self) -> object:
+        opts = self.func()
+        for k, v in self.fields.items():
+            setattr(opts, k, v)
+        return opts
 
 
 class ProcessGroupBabyGloo(ProcessGroupBaby):
