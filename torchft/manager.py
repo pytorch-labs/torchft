@@ -534,8 +534,11 @@ class Manager:
 
         self._logger.info("applying pending state dict")
 
-        assert self._pending_state_dict is not None, "checkpoint was not staged"
+        assert (
+            self._load_state_dict is not None
+        ), "user load_state_dict is not initialized."
         self._load_state_dict(self._pending_state_dict["user"])
+        assert self._pending_state_dict is not None, "checkpoint was not staged"
         self._pending_state_dict = None
         self._logger.info("Loaded state dict.")
 
@@ -607,6 +610,7 @@ class Manager:
         self._batches_committed = state_dict["batches_committed"]
 
     def _manager_state_dict(self) -> Dict[str, object]:
+        assert self._user_state_dict is not None, "user state_dict is not initialized."
         return {
             "user": self._user_state_dict(),
             "torchft": self.state_dict(),
