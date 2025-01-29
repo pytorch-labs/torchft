@@ -12,7 +12,7 @@ This module implements an optimizer wrapper that works with the Manager to provi
 
 """
 
-from typing import TYPE_CHECKING, Any, List, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
 from torch.optim import Optimizer
@@ -55,7 +55,7 @@ class OptimizerWrapper(Optimizer):
             self.optim.step()
 
     @property
-    def param_groups(self) -> List[Mapping[str, Any]]:
+    def param_groups(self) -> List[Dict[str, Any]]:
         return self.optim.param_groups
 
     @property
