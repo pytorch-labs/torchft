@@ -134,9 +134,7 @@ class CheckpointServer(CheckpointTransport[T]):
                         self.end_headers()
 
                         state_dict = ckpt_server._state_dict
-                        logger.warning("Before torch.save ===================.")
                         torch.save(state_dict, self.wfile)
-                        logger.warning("After torch.save ===================.")
 
                 except Exception as e:
                     logger.exception(

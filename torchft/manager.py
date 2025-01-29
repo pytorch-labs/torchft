@@ -608,12 +608,10 @@ class Manager:
         self._batches_committed = state_dict["batches_committed"]
 
     def _manager_state_dict(self) -> Dict[str, object]:
-        self._logger.warn("Before state_dict ===================.")
         ret = {
             "user": self._user_state_dict(),
             "torchft": self.state_dict(),
         }
-        self._logger.warn("After state_dict ===================.")
         return ret
 
     def state_dict(self) -> Dict[str, int]:
