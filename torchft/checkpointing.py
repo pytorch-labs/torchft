@@ -134,8 +134,8 @@ class CheckpointServer(CheckpointTransport[T]):
                         self.end_headers()
 
                         state_dict = ckpt_server._state_dict
-
                         torch.save(state_dict, self.wfile)
+
                 except Exception as e:
                     logger.exception(
                         f"Exception in checkpoint server when handling {self.path=}: {e}",
@@ -172,7 +172,9 @@ class CheckpointServer(CheckpointTransport[T]):
             data = f.read()
 
         reader = io.BytesIO(data)
-        return torch.load(reader, weights_only=True)
+        # We have to set weights_only to True as there are some non-tensor
+        # states like lr_scheduler.
+        return torch.load(reader, weights_only=False)
 
     def address(self) -> str:
         """

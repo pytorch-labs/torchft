@@ -12,7 +12,7 @@ This module implements an optimizer wrapper that works with the Manager to provi
 
 """
 
-from typing import TYPE_CHECKING, Optional
+from typing import Any, TYPE_CHECKING, Optional
 
 from torch.optim import Optimizer
 
@@ -52,3 +52,11 @@ class OptimizerWrapper(Optimizer):
         assert closure is None, "optimizers that use closures are not supported"
         if self.manager.should_commit():
             self.optim.step()
+
+    @property
+    def param_groups(self) -> Any:
+        return self.optim.param_groups
+
+    @property
+    def state(self) -> Any:
+        return self.optim.state
