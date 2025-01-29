@@ -4,37 +4,43 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import io
 import multiprocessing
 import os
 import unittest
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
-from typing import Any, Dict, Tuple, cast
-from unittest import TestCase, skipUnless
+from typing import Any, cast, Dict, Tuple
+from unittest import skipUnless, TestCase
 from unittest.mock import Mock
 
 import torch
 import torch.distributed as dist
 from torch import nn
 from torch._C._distributed_c10d import (
+    _resolve_process_group,
     AllgatherOptions,
     AllreduceOptions,
     BroadcastOptions,
     ReduceOp,
-    _resolve_process_group,
 )
 from torch.distributed import (
+    _functional_collectives,
+    get_world_size,
     ReduceOp,
     TCPStore,
     Work,
-    _functional_collectives,
-    get_world_size,
 )
 from torch.distributed.device_mesh import init_device_mesh
 
 from torchft.manager import Manager
 from torchft.process_group import (
+    _DummyWork,
+    _ErrorSwallowingWork,
+    _ManagedWork,
     ErrorSwallowingProcessGroupWrapper,
+    extend_device_mesh,
+    ft_init_device_mesh,
     ManagedProcessGroup,
     ProcessGroup,
     ProcessGroupBabyGloo,
@@ -43,11 +49,6 @@ from torchft.process_group import (
     ProcessGroupGloo,
     ProcessGroupNCCL,
     ProcessGroupWrapper,
-    _DummyWork,
-    _ErrorSwallowingWork,
-    _ManagedWork,
-    extend_device_mesh,
-    ft_init_device_mesh,
 )
 
 
@@ -405,10 +406,22 @@ class DeviceMeshTest(TestCase):
         )
         replicate_mesh = device_mesh["dp_replicate"]
         testcase.assertEqual(replicate_mesh.get_group(), replicate_group)
+
         flatten_mesh = device_mesh._flatten("dp")
+        manager.num_participants.return_value = 0
+        testcase.assertEqual(flatten_mesh.size(), world_size)
         manager.num_participants.return_value = 1
         testcase.assertEqual(flatten_mesh.size(), world_size)
+        manager.num_participants.return_value = 2
+        testcase.assertEqual(flatten_mesh.size(), world_size * 2)
+
         testcase.assertEqual(flatten_mesh.get_local_rank(), dist.get_rank())
+
+        device_mesh.get_coordinate()
+        buffer = io.BytesIO()
+        torch.save(device_mesh, buffer)
+        buffer.seek(0)
+        torch.load(buffer, weights_only=False)
 
     def test_init_device_mesh(self) -> None:
         with ProcessPoolExecutor(max_workers=4) as executor:
@@ -416,3 +429,5 @@ class DeviceMeshTest(TestCase):
             for i in range(4):
                 future = executor.submit(self._test_init_device_mesh, 4, i)
                 futures.append(future)
+            for f in futures:
+                f.result()

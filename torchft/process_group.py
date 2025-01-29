@@ -20,7 +20,7 @@ import logging
 import queue
 import threading
 from datetime import timedelta
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, TYPE_CHECKING, Union
 
 import torch
 import torch.distributed as dist
@@ -31,16 +31,16 @@ import torch.multiprocessing as mp
 from torch.distributed import (
     BroadcastOptions,
     DeviceMesh,
+    get_rank,
+    init_device_mesh,
     PrefixStore,
     ProcessGroup as BaseProcessGroup,
     ProcessGroupGloo as BaseProcessGroupGloo,
     ProcessGroupNCCL as BaseProcessGroupNCCL,
     Store,
     TCPStore,
-    get_rank,
-    init_device_mesh,
 )
-from torch.distributed.distributed_c10d import Work, _world
+from torch.distributed.distributed_c10d import _world, Work
 from torch.futures import Future
 
 if TYPE_CHECKING:
@@ -861,6 +861,8 @@ def extend_device_mesh(
 
 
 class ManagedDeviceMesh(DeviceMesh):
+    replicate_pg_singleton: Optional["ManagedProcessGroup"]
+
     def __init__(
         self,
         mesh: Optional[DeviceMesh],
@@ -889,6 +891,15 @@ class ManagedDeviceMesh(DeviceMesh):
         self._flatten_mesh_list: Tuple[DeviceMesh, ...] = tuple()
         self._thread_id: Optional[int] = None
 
+    def __getstate__(self) -> Dict[str, Any]:
+        state = self.__dict__.copy()
+        state["replicate_pg"] = None
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.replicate_pg = self.replicate_pg_singleton
+
     def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
         if isinstance(mesh_dim_names, str):
             if mesh_dim_names == self.replicate_dim_name:
@@ -906,13 +917,16 @@ class ManagedDeviceMesh(DeviceMesh):
                 return self.mesh[mesh_dim_names]
         else:
             assert isinstance(mesh_dim_names, tuple)
-            if self.replicate_dim_name in mesh_dim_names:
+            if self.replicate_dim_name not in mesh_dim_names:
                 assert self.mesh is not None
                 return self.mesh[mesh_dim_names]
             else:
                 assert self.mesh is not None
+                mesh_dim_names_wo_replicate = tuple(
+                    n for n in mesh_dim_names if n != self.replicate_dim_name
+                )
                 return ManagedDeviceMesh(
-                    self.mesh[mesh_dim_names],
+                    self.mesh[mesh_dim_names_wo_replicate],
                     mesh_dim_names,
                     self.replicate_pg,
                     mesh_dim_names.index(self.replicate_dim_name),
@@ -947,14 +961,18 @@ class ManagedDeviceMesh(DeviceMesh):
         return flatten_mesh
 
     def size(self, mesh_dim: Optional[int] = None) -> int:
+        replicate_pg_size = self.replicate_pg.size()
+        # We have to lie to the users if there are zero particpants.
+        # This is possible during the initialization stage of training.
+        replicate_pg_size = 1 if replicate_pg_size == 0 else replicate_pg_size
         if mesh_dim is None:
             if self.mesh is None:
-                return self.replicate_pg.size()
+                return replicate_pg_size
             else:
                 assert self.mesh is not None
-                return self.mesh.size() * self.replicate_pg.size()
+                return self.mesh.size() * replicate_pg_size
         elif mesh_dim == self.replicate_dim:
-            return self.replicate_pg.size()
+            return replicate_pg_size
         else:
             assert self.mesh is not None
             return self.mesh.size(self._real_mesh_dim(mesh_dim))
@@ -1004,7 +1022,16 @@ class ManagedDeviceMesh(DeviceMesh):
         dimensions of the mesh. If this rank is not part of the mesh, return None.
         """
         assert self.mesh is not None
-        return self.mesh._coordinate_on_dim if self.mesh._coordinate_on_dim else None
+        coordinate = (
+            self.mesh._coordinate_on_dim if self.mesh._coordinate_on_dim else None
+        )
+        if not coordinate:
+            return coordinate
+
+        # We need to copy be cause we are going to modify the coordinate.
+        coordinate = coordinate.copy()
+        coordinate.insert(get_rank(self.replicate_pg), self.replicate_dim)
+        return coordinate
 
     def get_all_groups(self) -> List[BaseProcessGroup]:
         raise NotImplementedError
@@ -1078,6 +1105,8 @@ def ft_init_device_mesh(
     # We have to use MultiProcessTestCase, otherwise c10d will complain
     # the same backend has been registered.
     replicate_pg.register(mesh_dim_names[replicate_dim])
+
+    ManagedDeviceMesh.replicate_pg_singleton = replicate_pg
 
     return ManagedDeviceMesh(
         mesh=mesh,
