@@ -7,13 +7,13 @@
 from datetime import timedelta
 from typing import Optional
 from unittest import TestCase
-from unittest.mock import create_autospec, MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import torch
 from torch.distributed import TCPStore
 
-from torchft.manager import Manager, MANAGER_ADDR_KEY, REPLICA_ID_KEY, WorldSizeMode
-from torchft.process_group import _DummyWork, ProcessGroup
+from torchft.manager import MANAGER_ADDR_KEY, REPLICA_ID_KEY, Manager, WorldSizeMode
+from torchft.process_group import ProcessGroup, _DummyWork
 from torchft.torchft import QuorumResult
 
 

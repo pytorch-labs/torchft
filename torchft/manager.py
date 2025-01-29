@@ -33,7 +33,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from enum import Enum
-from typing import Callable, cast, Dict, List, Optional, TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, cast
 
 import torch
 from torch.distributed import ReduceOp, TCPStore
