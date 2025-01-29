@@ -861,7 +861,7 @@ def extend_device_mesh(
 
 
 class ManagedDeviceMesh(DeviceMesh):
-    replicate_pg_singleton: Optional["ManagedProcessGroup"]
+    replicate_pg_singleton: Optional["ManagedProcessGroup"] = None
 
     def __init__(
         self,
@@ -1093,17 +1093,7 @@ def ft_init_device_mesh(
         mesh_dim_names=tuple(_mesh_dim_names),
     )
 
-    if device_type == "cpu":
-        pg = ProcessGroupGloo()
-    elif device_type == "cuda":
-        pg = ProcessGroupNCCL()
-    else:
-        raise ValueError()
-
-    manager._pg = pg
     replicate_pg = ManagedProcessGroup(manager)
-    # We have to use MultiProcessTestCase, otherwise c10d will complain
-    # the same backend has been registered.
     replicate_pg.register(mesh_dim_names[replicate_dim])
 
     ManagedDeviceMesh.replicate_pg_singleton = replicate_pg

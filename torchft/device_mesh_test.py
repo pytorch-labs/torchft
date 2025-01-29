@@ -15,7 +15,11 @@ import torch
 import torch.distributed as dist
 
 from torchft.manager import Manager
-from torchft.process_group import ManagedProcessGroup, ft_init_device_mesh
+from torchft.process_group import (
+    ManagedProcessGroup,
+    ProcessGroupGloo,
+    ft_init_device_mesh,
+)
 
 
 class DeviceMeshTest(TestCase):
@@ -29,6 +33,7 @@ class DeviceMeshTest(TestCase):
         testcase = TestCase()
 
         manager = Mock(spec=Manager)
+        manager._pg = ProcessGroupGloo()
         # Even though we only have 4 workers, we can still initialize (2, 4) mesh.
         # That's because the replicate group is NOT phystically created in the
         # real mesh but is virtually added to the mesh via ManagedDeviceMesh.
