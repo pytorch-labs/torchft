@@ -132,10 +132,20 @@ class ProcessGroup(BaseProcessGroup):
         input_tensor: List[torch.Tensor],
         opts: object,
     ) -> Work:
+        """
+        Gathers tensors from the whole group in a list.
+
+        See torch.distributed.all_gather for more details.
+        """
         raise NotImplementedError("not implemented")
 
     # pyre-fixme[14]: inconsistent override
     def broadcast(self, tensor_list: List[torch.Tensor], opts: object) -> Work:
+        """
+        Broadcasts the tensor to the whole group.
+
+        See torch.distributed.broadcast for more details.
+        """
         raise NotImplementedError("not implemented")
 
     def broadcast_one(self, tensor: torch.Tensor, root: int) -> Work:
