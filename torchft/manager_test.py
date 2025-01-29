@@ -12,9 +12,9 @@ from unittest.mock import MagicMock, create_autospec, patch
 import torch
 from torch.distributed import TCPStore
 
+from torchft._torchft import QuorumResult
 from torchft.manager import MANAGER_ADDR_KEY, REPLICA_ID_KEY, Manager, WorldSizeMode
 from torchft.process_group import ProcessGroup, _DummyWork
-from torchft.torchft import QuorumResult
 
 
 def mock_should_commit(
@@ -111,7 +111,7 @@ class TestManager(TestCase):
         quorum.max_world_size = 2
         quorum.heal = False
 
-        client_mock().quorum.return_value = quorum
+        client_mock()._quorum.return_value = quorum
 
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager.current_step(), 0)
@@ -148,7 +148,7 @@ class TestManager(TestCase):
         quorum.max_world_size = 2
         quorum.heal = True
 
-        client_mock().quorum.return_value = quorum
+        client_mock()._quorum.return_value = quorum
 
         # forcible increment checkpoint server to compute correct address
         manager._checkpoint_transport.send_checkpoint(
@@ -157,7 +157,7 @@ class TestManager(TestCase):
             state_dict=manager._manager_state_dict(),
             timeout=timedelta(seconds=10),
         )
-        client_mock().checkpoint_metadata.return_value = (
+        client_mock()._checkpoint_metadata.return_value = (
             manager._checkpoint_transport.metadata()
         )
 
@@ -199,7 +199,7 @@ class TestManager(TestCase):
         quorum.max_world_size = 1
         quorum.heal = True
 
-        client_mock().quorum.return_value = quorum
+        client_mock()._quorum.return_value = quorum
 
         # forcible increment checkpoint server to compute correct address
         manager._checkpoint_transport.send_checkpoint(
@@ -208,7 +208,7 @@ class TestManager(TestCase):
             state_dict=manager._manager_state_dict(),
             timeout=timedelta(seconds=10),
         )
-        client_mock().checkpoint_metadata.return_value = (
+        client_mock()._checkpoint_metadata.return_value = (
             manager._checkpoint_transport.metadata()
         )
 
@@ -261,7 +261,7 @@ class TestManager(TestCase):
         quorum.max_world_size = 1
         quorum.heal = True
 
-        client_mock().quorum.return_value = quorum
+        client_mock()._quorum.return_value = quorum
 
         # forceable increment checkpoint server to compute correct address
         manager._checkpoint_transport.send_checkpoint(
@@ -270,7 +270,7 @@ class TestManager(TestCase):
             state_dict=manager._manager_state_dict(),
             timeout=timedelta(seconds=10),
         )
-        client_mock().checkpoint_metadata.return_value = (
+        client_mock()._checkpoint_metadata.return_value = (
             manager._checkpoint_transport.metadata()
         )
 
@@ -320,7 +320,7 @@ class TestManager(TestCase):
         quorum.max_world_size = 2
         quorum.heal = False
 
-        client_mock().quorum.return_value = quorum
+        client_mock()._quorum.return_value = quorum
 
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager.current_step(), 0)
@@ -394,7 +394,7 @@ class TestManager(TestCase):
             quorum.max_world_size = 3
             quorum.heal = False
 
-            client_mock().quorum.return_value = quorum
+            client_mock()._quorum.return_value = quorum
 
             self.assertEqual(manager._quorum_id, -1)
             self.assertEqual(manager.current_step(), 0)
@@ -428,7 +428,7 @@ class TestManager(TestCase):
         quorum.max_rank = None
         quorum.max_world_size = 2
         quorum.heal = True
-        client_mock().quorum.return_value = quorum
+        client_mock()._quorum.return_value = quorum
 
         self.assertEqual(manager._quorum_id, -1)
         self.assertEqual(manager.current_step(), 0)
@@ -526,11 +526,11 @@ class TestManager(TestCase):
         quorum.max_world_size = 2
         quorum.heal = False
 
-        client_mock().quorum.return_value = quorum
+        client_mock()._quorum.return_value = quorum
 
         manager.start_quorum(timeout=timedelta(seconds=12))
         self.assertEqual(
-            client_mock().quorum.call_args.kwargs["timeout"], timedelta(seconds=12)
+            client_mock()._quorum.call_args.kwargs["timeout"], timedelta(seconds=12)
         )
 
         self.assertTrue(manager.should_commit(timeout=timedelta(seconds=23)))
