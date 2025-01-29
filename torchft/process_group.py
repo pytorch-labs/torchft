@@ -898,6 +898,7 @@ class ManagedDeviceMesh(DeviceMesh):
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
         self.__dict__.update(state)
+        assert self.replicate_pg_singleton is not None
         self.replicate_pg = self.replicate_pg_singleton
 
     def __getitem__(self, mesh_dim_names: Union[str, Tuple[str, ...]]) -> DeviceMesh:
@@ -921,10 +922,10 @@ class ManagedDeviceMesh(DeviceMesh):
                 assert self.mesh is not None
                 return self.mesh[mesh_dim_names]
             else:
-                assert self.mesh is not None
                 mesh_dim_names_wo_replicate = tuple(
                     n for n in mesh_dim_names if n != self.replicate_dim_name
                 )
+                assert self.mesh is not None
                 return ManagedDeviceMesh(
                     self.mesh[mesh_dim_names_wo_replicate],
                     mesh_dim_names,
