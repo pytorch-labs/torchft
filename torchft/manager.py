@@ -144,6 +144,7 @@ class Manager:
                 transfering checkpoints to recovering replicas
         """
         self._load_state_dict = load_state_dict
+        self._user_state_dict = state_dict
         self._pending_state_dict: Optional[Dict[str, object]] = None
         self._use_async_quorum = use_async_quorum
         self._timeout = timeout
@@ -157,8 +158,6 @@ class Manager:
         rank = self._rank
         world_size = world_size or int(os.environ["WORLD_SIZE"])
         self._min_replica_size = min_replica_size
-
-        self._user_state_dict = state_dict
 
         if checkpoint_transport is None:
             checkpoint_transport = CheckpointServer[Dict[str, T]](
@@ -608,11 +607,10 @@ class Manager:
         self._batches_committed = state_dict["batches_committed"]
 
     def _manager_state_dict(self) -> Dict[str, object]:
-        ret = {
+        return {
             "user": self._user_state_dict(),
             "torchft": self.state_dict(),
         }
-        return ret
 
     def state_dict(self) -> Dict[str, int]:
         """
