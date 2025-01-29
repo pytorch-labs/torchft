@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from unittest import TestCase
-from unittest.mock import create_autospec, MagicMock
+from unittest.mock import MagicMock, create_autospec
 
 import torch
 from torch.nn import Linear
