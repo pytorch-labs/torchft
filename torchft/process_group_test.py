@@ -266,6 +266,31 @@ class ProcessGroupTest(TestCase):
 
         self.assertEqual(a.num_active_work(), 0)
 
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    @skipUnless(torch.cuda.is_available(), "needs CUDA")
+    def test_baby_nccl_apis(self) -> None:
+        # set to 1 if more than >=2 gpus
+        device_id = 1 % torch.cuda.device_count()
+        torch.cuda.set_device(device_id)
+
+        store = TCPStore(
+            host_name="localhost", port=0, is_master=True, wait_for_workers=False
+        )
+
+        store_addr = f"localhost:{store.port}/prefix"
+
+        a = ProcessGroupBabyNCCL(timeout=timedelta(seconds=10))
+        a.configure(store_addr, 0, 1)
+
+        _test_pg(a, torch.randn((2, 3), device="cuda"))
+
+        torch.cuda.synchronize()
+
+        # force collection to ensure no BabyWork objects remain
+        gc.collect()
+
+        self.assertEqual(a.num_active_work(), 0)
+
     def test_dummy(self) -> None:
         pg = ProcessGroupDummy(0, 1)
         m = nn.Linear(3, 4)
@@ -282,12 +307,15 @@ class ProcessGroupTest(TestCase):
         store_addr: str = f"localhost:{store.port}/prefix"
 
         def run(rank: int) -> Tuple[torch.Tensor, Work]:
-            a = ProcessGroupBabyNCCL()
+            a = ProcessGroupBabyNCCL(
+                timeout=timedelta(seconds=10.0),
+            )
             a.configure(store_addr, rank, 2)
-
             self.assertEqual(a.size(), 2)
 
-            at = torch.tensor([rank + 1], device=f"cuda:{rank}")
+            # We test using set_device to ensure stream device is correct.
+            torch.cuda.set_device(rank)
+            at = torch.tensor([rank + 1], device="cuda")
 
             a_work = a.allreduce([at], ReduceOp.SUM)
             return at, a_work
