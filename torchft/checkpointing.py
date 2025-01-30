@@ -17,9 +17,10 @@ import socket
 import threading
 import urllib.request
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler
-from typing import Generic, List, Optional, TypeVar
+from typing import Generator, Generic, List, Optional, TypeVar
 
 import torch
 
@@ -87,6 +88,25 @@ class CheckpointTransport(Generic[T], ABC):
         """
 
 
+@contextmanager
+def _timed_acquire(
+    lock: threading.Lock, timeout: timedelta
+) -> Generator[None, None, None]:
+    """
+    Acquire a lock with a timeout.
+
+    Args:
+        lock: the lock to acquire
+        timeout: the timeout to acquire the lock
+    """
+    if not lock.acquire(timeout=timeout.total_seconds()):
+        raise TimeoutError(f"timed out acquiring lock after {timeout}")
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 class CheckpointServer(CheckpointTransport[T]):
     """
     This is an HTTP server that can be used to transfer checkpoints
@@ -106,6 +126,10 @@ class CheckpointServer(CheckpointTransport[T]):
         self._timeout = timeout
         self._state_dict: Optional[T] = None
 
+        # We don't allow checkpoints until the first send_checkpoint to avoid
+        # serving the default step=-1 invalid checkpoint.
+        self.disallow_checkpoint()
+
         ckpt_server = self
 
         class RequestHandler(BaseHTTPRequestHandler):
@@ -117,7 +141,9 @@ class CheckpointServer(CheckpointTransport[T]):
                     # validate socket timeout is actually set
                     assert self.connection.gettimeout() == self.timeout
 
-                    with ckpt_server._checkpoint_lock:
+                    with _timed_acquire(
+                        ckpt_server._checkpoint_lock, ckpt_server._timeout
+                    ):
                         step = ckpt_server._step
 
                         if self.path != f"/checkpoint/{step}":

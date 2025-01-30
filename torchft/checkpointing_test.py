@@ -4,12 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import threading
 import urllib.error
 from datetime import timedelta
 from unittest import TestCase
 from unittest.mock import MagicMock
 
-from torchft.checkpointing import CheckpointServer
+from torchft.checkpointing import CheckpointServer, _timed_acquire
 
 
 class TestCheckpointing(TestCase):
@@ -55,3 +56,50 @@ class TestCheckpointing(TestCase):
             )
 
         server.shutdown()
+
+    def test_checkpoint_server_locking(self) -> None:
+        server = CheckpointServer(
+            timeout=timedelta(seconds=10),
+        )
+
+        # server should start up in a disallowed state this will block incoming
+        # requests until allow_checkpoint is called
+        self.assertTrue(server._checkpoint_lock.locked())
+        self.assertTrue(server._disallowed)
+        self.assertEqual(server._step, -1)
+
+        # allow requests
+        server.allow_checkpoint(1)
+
+        self.assertFalse(server._checkpoint_lock.locked())
+        self.assertFalse(server._disallowed)
+        self.assertEqual(server._step, 1)
+
+        # duplicate allow/disallow is fine
+        server.allow_checkpoint(2)
+        self.assertEqual(server._step, 2)
+
+        server.disallow_checkpoint()
+        server.disallow_checkpoint()
+        self.assertTrue(server._checkpoint_lock.locked())
+        self.assertTrue(server._disallowed)
+
+        server.shutdown()
+
+    def test_timed_acquire(self) -> None:
+        lock = threading.Lock()
+
+        with _timed_acquire(lock, timedelta(seconds=10)):
+            self.assertTrue(lock.locked())
+
+        self.assertFalse(lock.locked())
+
+        lock.acquire()
+
+        with self.assertRaisesRegex(
+            TimeoutError, r"timed out acquiring lock after 0.0"
+        ):
+            with _timed_acquire(lock, timedelta(seconds=0.0)):
+                pass
+
+        self.assertTrue(lock.locked())
