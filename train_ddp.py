@@ -7,6 +7,7 @@
 import logging
 import os
 import sys
+from datetime import timedelta
 
 import torch
 import torch.nn.functional as F
@@ -70,7 +71,13 @@ def main() -> None:
         }
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    pg = ProcessGroupBabyNCCL() if torch.cuda.is_available() else ProcessGroupGloo()
+    pg = (
+        ProcessGroupBabyNCCL(
+            timeout=timedelta(seconds=5),
+        )
+        if torch.cuda.is_available()
+        else ProcessGroupGloo(timeout=timedelta(seconds=5))
+    )
 
     manager = Manager(
         pg=pg,
@@ -78,6 +85,7 @@ def main() -> None:
         load_state_dict=load_state_dict,
         state_dict=state_dict,
         replica_id=f"train_ddp_{REPLICA_GROUP_ID}",
+        timeout=timedelta(seconds=10),
     )
 
     class Net(nn.Module):

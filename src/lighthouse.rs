@@ -77,7 +77,7 @@ pub struct LighthouseOpt {
     #[structopt(
         long = "join_timeout_ms",
         default_value = "60000",
-        help = "How long to wait for new replicas to join before considering a quorum"
+        help = "How long to wait for heartbeating stragglers to join before issuing quorum"
     )]
     pub join_timeout_ms: u64,
 
@@ -90,14 +90,14 @@ pub struct LighthouseOpt {
     #[structopt(
         long = "quorum_tick_ms",
         default_value = "100",
-        help = "How frequently to check for quorum when waiting for workers."
+        help = "How frequently to check for quorum when waiting for stragglers."
     )]
     pub quorum_tick_ms: u64,
 
     #[structopt(
         long = "heartbeat_timeout_ms",
         default_value = "5000",
-        help = "how long to wait for a heartbeat before considering a replica dead."
+        help = "How long to wait for a heartbeat before considering a replica dead."
     )]
     pub heartbeat_timeout_ms: u64,
 }

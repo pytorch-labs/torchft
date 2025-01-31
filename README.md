@@ -13,7 +13,7 @@ Easy Per Step Fault Tolerance for PyTorch
   | <a href="https://pytorch.org/torchft/"><b>Documentation</b></a>
   | <a href="https://github.com/pytorch-labs/torchft/blob/main/media/fault_tolerance_poster.pdf"><b>Poster</b></a>
   | <a href="https://docs.google.com/document/d/1OZsOsz34gRDSxYXiKkj4WqcD9x0lP9TcsfBeu_SsOY4/edit"><b>Design Doc</b></a>
-  | 
+  |
 </p>
 <p align="center">
   <a href="https://pypi.org/project/torchft-nightly/"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/torchft-nightly"></a>
@@ -98,7 +98,7 @@ when using synchronous training.
 You can start a lighthouse server by running:
 
 ```sh
-$ RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join_timeout_ms 1000
+$ RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join_timeout_ms 10000
 ```
 
 ### Example Training Loop (DDP)
@@ -108,7 +108,7 @@ See [train_ddp.py](./train_ddp.py) for the full example.
 Invoke with:
 
 ```sh
-$ TORCHFT_MANAGER_PORT=29512 TORCHFT_LIGHTHOUSE=http://localhost:29510 torchrun --master_port 29501 --nnodes 1 --nproc_per_node 1 train.py
+$ TORCHFT_LIGHTHOUSE=http://localhost:29510 torchrun --master_port 29501 --nnodes 1 --nproc_per_node 1 train.py
 ```
 
 train.py:
